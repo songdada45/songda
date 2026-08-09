@@ -544,17 +544,44 @@ CHART_SHORT_DAYS = 45    # 短期图: 约2个月交易日，观察近期拐点
 
 
 def setup_chinese_font():
-    """配置中文字体"""
-    try:
-        import matplotlib.font_manager as fm
-        for font_name in ["Microsoft YaHei", "SimHei", "STHeiti", "WenQuanYi Micro Hei"]:
-            try:
-                fm.findfont(font_name, fallback_to_default=False)
-                return font_name
-            except Exception:
-                continue
-    except Exception:
-        pass
+    """配置中文字体 —— 跨平台自动检测 (Windows/Linux/macOS)"""
+    import matplotlib.font_manager as fm
+    import glob as _glob
+
+    # ── Linux: 搜索并注册 Noto CJK 字体 (apt install fonts-noto-cjk) ──
+    noto_dirs = [
+        "/usr/share/fonts/opentype/noto",
+        "/usr/share/fonts/truetype/noto",
+        "/usr/share/fonts/noto-cjk",
+        "/usr/share/fonts/noto",
+    ]
+    for d in noto_dirs:
+        if os.path.exists(d):
+            for font_file in _glob.glob(os.path.join(d, "**", "NotoSans*CJK*.ttc"), recursive=True) + \
+                             _glob.glob(os.path.join(d, "**", "NotoSans*CJK*.ttf"), recursive=True):
+                try:
+                    fm.fontManager.addfont(font_file)
+                except Exception:
+                    pass
+
+    # ── 优先级: Noto CJK (Linux) → 文泉驿 → Windows 字体 → 回退 ──
+    font_candidates = [
+        "Noto Sans CJK SC",      # Noto 简体中文 (Ubuntu)
+        "Noto Sans CJK TC",      # Noto 繁体中文
+        "Noto Sans CJK JP",      # Noto 日文 (也含汉字)
+        "Noto Sans CJK",         # 通用
+        "WenQuanYi Micro Hei",   # 文泉驿微米黑
+        "WenQuanYi Zen Hei",     # 文泉驿正黑
+        "Microsoft YaHei",       # 微软雅黑 (Windows)
+        "SimHei",                # 黑体 (Windows)
+        "STHeiti",               # 华文黑体 (macOS)
+    ]
+    for font_name in font_candidates:
+        try:
+            fm.findfont(font_name, fallback_to_default=False)
+            return font_name
+        except Exception:
+            continue
     return "sans-serif"
 
 
@@ -562,7 +589,13 @@ def _setup_dark_style():
     """统一深色主题配置"""
     import matplotlib.pyplot as plt
     font_name = setup_chinese_font()
-    plt.rcParams["font.family"] = font_name
+    # 使用 sans-serif 回退链: 如果首选字体缺字, 自动回退到下一个
+    if font_name != "sans-serif":
+        plt.rcParams["font.sans-serif"] = [font_name] + plt.rcParams["font.sans-serif"]
+    else:
+        plt.rcParams["font.sans-serif"] = ["Noto Sans CJK SC", "WenQuanYi Micro Hei",
+                                             "Microsoft YaHei", "SimHei"] + plt.rcParams["font.sans-serif"]
+    plt.rcParams["font.family"] = "sans-serif"
     plt.rcParams["font.size"] = 14
     plt.rcParams["axes.labelsize"] = 14
     plt.rcParams["xtick.labelsize"] = 12
@@ -1042,16 +1075,31 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     BLUE_COLOR = (88, 166, 255)       # 成长/蓝色信号
     GOLD_COLOR = (255, 200, 50)      # 持仓指令高亮色
 
-    # ── 加载字体（跨平台：Windows / Linux）──
-    font_paths = [
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",  # Linux (GitHub Actions)
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        "C:/Windows/Fonts/msyh.ttc",       # 微软雅黑
-        "C:/Windows/Fonts/msyhbd.ttc",     # 微软雅黑粗体
-        "C:/Windows/Fonts/simhei.ttf",     # 黑体
-        "C:/Windows/Fonts/simsun.ttc",     # 宋体
-    ]
+    # ── 加载字体（跨平台：自动发现）──
+    import glob as _glob
+
+    # 动态发现 Noto CJK 字体 (Linux GitHub Actions)
+    def _discover_fonts():
+        paths = []
+        # Linux: 递归搜索 Noto CJK 字体
+        for base in ["/usr/share/fonts", "/usr/local/share/fonts"]:
+            if os.path.exists(base):
+                paths.extend(_glob.glob(os.path.join(base, "**", "NotoSans*CJK*.ttc"), recursive=True))
+                paths.extend(_glob.glob(os.path.join(base, "**", "NotoSans*CJK*.ttf"), recursive=True))
+                # 也搜索文泉驿
+                paths.extend(_glob.glob(os.path.join(base, "**", "wqy*.ttc"), recursive=True))
+                paths.extend(_glob.glob(os.path.join(base, "**", "wqy*.ttf"), recursive=True))
+        # Windows 字体
+        win_fonts = [
+            "C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/msyhbd.ttc",
+            "C:/Windows/Fonts/simhei.ttf", "C:/Windows/Fonts/simsun.ttc",
+        ]
+        for fp in win_fonts:
+            if os.path.exists(fp):
+                paths.append(fp)
+        return paths
+
+    font_paths = _discover_fonts()
 
     def _load_font(size, bold=False):
         for fp in font_paths:
@@ -1059,7 +1107,11 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                 return ImageFont.truetype(fp, size)
             except Exception:
                 continue
-        return ImageFont.load_default()
+        # 最后回退
+        try:
+            return ImageFont.truetype("C:/Windows/Fonts/arial.ttf", size)
+        except Exception:
+            return ImageFont.load_default()
 
     # 字体全部放大 ~1.5倍
     font_title = _load_font(72)       # 大标题
