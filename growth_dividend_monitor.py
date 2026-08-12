@@ -1899,7 +1899,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     def _draw_holding_periods(draw, x: int, y: int, width: int, periods: list[dict]):
         """创红方案 持仓周期表: 每个成长期持仓周期一行。
 
-        列: 买入日期 | 卖出日期 | 持有TOP3 | 区间收益 | 持有天数 | 状态(是否等)
+        列: 买入日期 | 卖出日期 | 持有TOP3 | 区间收益 | 持有天数 | 状态
         红利期=空仓等待(持币, 收益=0); 成长期=满仓持有当期TOP3等权。
         """
         draw.text((x, y), "创红方案 持仓周期表（每次买入 → 卖出）",
@@ -1938,7 +1938,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         draw.text((x_top3 + 16, _hx), "持有TOP3（等权）", fill=CAPTION_COLOR, font=font_small)
         draw.text((x_ret + 16, _hx), "区间收益", fill=CAPTION_COLOR, font=font_small)
         draw.text((x_days + 16, _hx), "持有天数", fill=CAPTION_COLOR, font=font_small)
-        draw.text((x_status + 16, _hx), "状态(是否等)", fill=CAPTION_COLOR, font=font_small)
+        draw.text((x_status + 16, _hx), "状态", fill=CAPTION_COLOR, font=font_small)
 
         ry = ty + HEADER_ROW_H
         for i, p in enumerate(periods):
