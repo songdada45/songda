@@ -239,9 +239,11 @@ def get_index_data(index_info: dict) -> list[dict] | None:
     cached = load_cache(code)
     if cached and len(cached) >= 15:
         latest_date = max(r["date"] for r in cached)
-        if latest_date >= (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d"):
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if latest_date >= today_str:
+            # 缓存已含今日数据 → 直接复用, 不必重新抓取
             return cached
-        print(f"  缓存过期 ({latest_date})，刷新...")
+        print(f"  缓存非今日 ({latest_date})，重新抓取今日数据...")
 
     sources = [
         ("腾讯财经", lambda: fetch_tencent_kline(market, code, days)),
