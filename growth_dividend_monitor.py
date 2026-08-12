@@ -191,7 +191,7 @@ def save_cache(index_code: str, records: list[dict]):
 
 
 def load_long_csv_data() -> dict[str, list[dict]] | None:
-    """从博主15年CSV数据加载更长历史 (用于累计收益图扩展时间轴)
+    """从博主15年CSV数据加载更长历史 (用于年度涨幅表 / 只做成长曲线扩展时间轴)
     
     CSV 来源: ZF1Huang/growth_dividend_rotation_research data_cache/
     数据范围:
@@ -864,7 +864,7 @@ def format_brief(result: dict, basket_info: dict | None = None) -> str:
     return "\n".join(lines)
 
 
-# ─── 可视化图表 (长期 / 短期 / 累计收益) ──────────────────
+# ─── 可视化图表 (长期 / 短期) ───────────────────────────
 
 CHART_LONG_DAYS = 750    # 长期图: 约3年交易日，把握大趋势
 CHART_SHORT_DAYS = 45    # 短期图: 约2个月交易日，观察近期拐点
@@ -1211,29 +1211,6 @@ def plot_chart_short(signals: list[dict], result: dict, save_path: str):
     plt.close(fig)
 
 
-# ── 图表 3: 合并累计收益曲线 (5条曲线) ──────────────────
-
-def _add_position_markers(ax, dates, nav_values, positions, marker_size=95):
-    """在策略净值曲线上叠加持仓标记点 — 只在切换点标记
-    - 红利 (position=0): 红色圆点  ●
-    - 成长 (position=1): 蓝色三角 ▲
-    - 仅在持仓发生变化时标记，自然交替出现
-    """
-    prev_pos = None
-    for i in range(1, len(dates)):
-        pos = positions[i]
-        if pos is None:
-            continue
-        if pos != prev_pos:
-            # 切换点：标记
-            color = "#ff6b6b" if pos == 0 else "#58a6ff"
-            marker = "o" if pos == 0 else "^"
-            ax.scatter(dates[i], nav_values[i], color=color, marker=marker,
-                       s=marker_size, zorder=10, alpha=0.95,
-                       edgecolors="white", linewidths=1.0)
-        prev_pos = pos
-
-
 def _merge_price_maps(csv_rows, api_rows):
     """CSV长数据 + API最新数据合并, CSV优先(覆盖更早日期)。
     返回 (close_map, open_map); open 缺失记为 None(策略计算时回退收盘价)。"""
@@ -1255,9 +1232,9 @@ def _merge_price_maps(csv_rows, api_rows):
 def prepare_backtest_data() -> dict | None:
     """一次性加载并合并长数据 + 腾讯API最新日, 计算创业板指/红利策略 NAV/信号/逐年收益。
 
-    供 plot_combined_returns_chart / plot_growth_only_curve_chart 共用,
+    供 plot_growth_only_curve_chart / compose_all_charts 共用,
     消除原设计中创业板对 NAV 被算两遍、API 被调 6 次的冗余。
-    返回 None 表示数据不全, 调用方应跳过累计收益相关图。
+    返回 None 表示数据不全, 调用方应跳过相关图。
     """
     from datetime import datetime as dt
 
@@ -1296,155 +1273,6 @@ def prepare_backtest_data() -> dict | None:
         "cyb_div_nav": cyb_div_nav, "cyb_growth_nav": cyb_growth_nav,
         "cyb_strat_dates": cyb_strat_dates, "cyb_annual": cyb_annual, "cyb_go_annual": cyb_go_annual,
     }
-
-
-def plot_combined_returns_chart(prep: dict, results: list[dict], save_path: str):
-    """合并收益对比图 — 归一化收益曲线
-
-    曲线:
-      1. 一直持有中证红利 (红利基准)
-      2. 一直持有创业板指 (成长)
-      3. 策略轮动(创业板指 vs 红利)
-      4. 策略-红利贡献 / 5. 策略-成长贡献 (收益分解)
-
-    策略轮动逻辑:
-      - Day T 收盘生成信号 → Day T+1 开盘执行 (避免前视偏差)
-      - 信号='成长'时持有成长指数, 信号='红利'时持有红利指数
-      - 扣除单边交易费 0.1%
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    import matplotlib.dates as mdates
-    from datetime import datetime as dt
-
-    _setup_dark_style()
-
-    # ── 从预计算数据包读取 (main() 已一次性加载并计算, 此处不再重复) ──
-    cyb_div_dates = prep["cyb_div_dates"]
-    cyb_strat_nav, cyb_strat_pos = prep["cyb_strat_nav"], prep["cyb_strat_pos"]
-    cyb_div_nav, cyb_growth_nav = prep["cyb_div_nav"], prep["cyb_growth_nav"]
-    cyb_strat_dates = prep["cyb_strat_dates"]
-    cyb_annual, cyb_go_annual = prep["cyb_annual"], prep["cyb_go_annual"]
-
-    # Buy & Hold 归一化曲线 (开盘价口径, 与策略执行/年度表一致)
-    div_open, div_map = prep["div_open"], prep["div_map"]
-    cyb_open, cyb_map = prep["cyb_open"], prep["cyb_map"]
-    div_bh_dt = [dt.strptime(d, "%Y-%m-%d") for d in cyb_div_dates]
-    div_bh_norm = compute_buyhold_nav([div_open.get(d) for d in cyb_div_dates])
-    cyb_bh_norm = compute_buyhold_nav([cyb_open.get(d) for d in cyb_div_dates])
-
-    # ── 绘图 ──
-    fig, ax = plt.subplots(figsize=(20, 8))
-    fig.patch.set_facecolor("#0d1117")
-    ax.set_facecolor("#0d1117")
-
-    # 曲线 — 各自从最早可用日期开始
-    l_div = ax.plot(div_bh_dt, div_bh_norm, color="#ff6b6b", linewidth=1.8, alpha=0.9,
-                     label="中证红利 Buy&Hold")[0]
-    l_cyb = ax.plot(div_bh_dt, cyb_bh_norm, color="#58a6ff", linewidth=1.5, alpha=0.8, linestyle="--",
-                     label="创业板指 Buy&Hold")[0]
-
-    l_cyb_s = ax.plot(cyb_strat_dates, cyb_strat_nav, color="#ffa94d", linewidth=2.5, alpha=1.0,
-                       label="策略轮动(创业板指)")[0]
-
-    # ── 策略收益分解: 红利贡献 & 成长贡献 (创业板策略) ──
-    l_div_part = ax.plot(cyb_strat_dates, cyb_div_nav, color="#ff6b6b", linewidth=1.4, alpha=0.7, linestyle=":",
-                          label="策略-红利贡献")[0]
-    l_growth_part = ax.plot(cyb_strat_dates, cyb_growth_nav, color="#58a6ff", linewidth=1.4, alpha=0.7, linestyle=":",
-                             label="策略-成长贡献")[0]
-
-    # ── 策略轮动持仓标记 (红=红利, 蓝=成长) ──
-    _add_position_markers(ax, cyb_strat_dates, cyb_strat_nav, cyb_strat_pos, marker_size=95)
-
-    # 基准线 1.0
-    ax.axhline(y=1.0, color="#8b949e", linewidth=0.6, linestyle=":", alpha=0.5)
-
-    # ── 信息框 (左上角) ──
-    cyb_result = next((r for r in results if "创业板" in r.get("index_pair", "")), {})
-
-    info_lines = [
-        f"红利/创业板: {cyb_div_dates[0]} ~ {cyb_div_dates[-1]} ({len(cyb_div_dates)}天)",
-        f"策略: 缓冲均线 (带宽=1%, MA=20日, 单边费=0.1%)",
-        f"当前信号: 创→{cyb_result.get('current_signal','?')}期",
-    ]
-    info_text = "\n".join(info_lines)
-    ax.text(0.02, 0.97, info_text, transform=ax.transAxes,
-            fontsize=12, color="#8b949e", va="top", ha="left",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="#161b22",
-                       edgecolor="#30363d", alpha=0.9))
-
-    # ── 策略收益分解 (放在信息框下方) ──
-    # 恒等式守卫: 策略终值 = 红利贡献 × 成长贡献 (误差应≈0)。
-    # 若恒等式不成立，说明收益分解计算异常 —— 宁可不出累计收益图，
-    # 也绝不推送错误的拆分数字 (涉及真金白银)。
-    if abs(cyb_strat_nav[-1] - cyb_div_nav[-1] * cyb_growth_nav[-1]) >= 1e-6:
-        print(f"  [累计收益图] ⚠️ 严重: 策略收益分解恒等式不成立 "
-              f"({cyb_strat_nav[-1]} vs {cyb_div_nav[-1]*cyb_growth_nav[-1]})，"
-              f"跳过累计收益图以避免推送错误数字")
-        return None
-    div_pct = (cyb_div_nav[-1] - 1) * 100
-    growth_pct = (cyb_growth_nav[-1] - 1) * 100
-    strat_pct = (cyb_strat_nav[-1] - 1) * 100
-    contribution_lines = [
-        f"策略收益分解 (创业板, 开盘价无前视偏差):",
-        f"  策略总收益: {cyb_strat_nav[-1]:.2f}x ({strat_pct:+.0f}%)",
-        f"  红利期贡献: {cyb_div_nav[-1]:.2f}x ({div_pct:+.0f}%)  ← 负=避险舱",
-        f"  成长期贡献: {cyb_growth_nav[-1]:.2f}x ({growth_pct:+.0f}%)",
-    ]
-    contribution_text = "\n".join(contribution_lines)
-    ax.text(0.02, 0.74, contribution_text, transform=ax.transAxes,
-            fontsize=11, color="#e6edf3", va="top", ha="left",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="#161b22",
-                       edgecolor="#30363d", alpha=0.92))
-
-    # ── 最终收益排行 (放在左侧信息框下方, 不遮挡曲线) ──
-    rankings = [
-        ("中证红利 Buy&Hold", div_bh_norm[-1], "#ff6b6b"),
-        ("创业板指 Buy&Hold", cyb_bh_norm[-1], "#58a6ff"),
-        ("策略轮动(创业板指)", cyb_strat_nav[-1], "#ffa94d"),
-    ]
-    rankings.sort(key=lambda x: x[1], reverse=True)  # 收益从高到低
-
-    rank_lines = ["最终收益排行 (投入1元 → ?)"]
-    medal = ["1st", "2nd", "3rd", "4th", "5th"]
-    for i, (name, val, color) in enumerate(rankings):
-        pct = (val - 1) * 100
-        rank_lines.append(f"{medal[i]} {name}: {val:.2f}元 (+{pct:+.0f}%)")
-
-    rank_text = "\n".join(rank_lines)
-    ax.text(0.02, 0.50, rank_text, transform=ax.transAxes,
-            fontsize=11, color="#e6edf3", va="top", ha="left",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor="#161b22",
-                       edgecolor="#30363d", alpha=0.92))
-
-    _style_ax(ax, ylabel="归一化收益 (起点=1.0)")
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
-    ax.xaxis.set_major_locator(mdates.YearLocator())
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}x"))
-    fig.autofmt_xdate(rotation=30)
-
-    data_start = cyb_div_dates[0]
-    end_date_str = cyb_div_dates[-1]
-    end_dt = dt.strptime(end_date_str, "%Y-%m-%d")
-    start_dt = dt.strptime(data_start, "%Y-%m-%d")
-    coverage_years = round((end_dt - start_dt).days / 365.25, 1)
-    plt.suptitle(f"成长/红利 风格轮动 — 累计收益对比 (自 {data_start}, ~{coverage_years}年)",
-                 fontsize=20, color="#e6edf3", fontweight="bold", y=0.98)
-
-    # 图例 (放在图表下方, 永不遮挡曲线)
-    legend = ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.10),
-                       framealpha=0.88, fontsize=11, ncol=3,
-                       facecolor="#161b22", edgecolor="#30363d",
-                       labelcolor="#e6edf3")
-    for text in legend.get_texts():
-        text.set_color("#e6edf3")
-
-    fig.tight_layout(rect=[0, 0.12, 1, 0.95])
-    fig.savefig(save_path, dpi=150, facecolor="#0d1117", bbox_inches="tight")
-    plt.close(fig)
-    print(f"  合并收益图: {save_path}")
-    return save_path, cyb_annual, cyb_go_annual
 
 
 def save_report(result: dict, report_text: str):
@@ -1775,6 +1603,49 @@ def get_current_basket_info() -> dict:
 
 # ─── 合成图: 所有图表纵向拼接为一张大图 ─────────────────
 
+def _compute_holding_periods(combined: dict) -> list[dict]:
+    """从创红方案 NAV/仓位 提取每个成长期持仓周期。
+
+    返回每行: {buy, sell, top3, ret, days, status}
+      - buy:  成长期首日出 (信号次日开盘买入)
+      - sell: 下一交易日(红利期首日, 开盘卖出); 若仍持有则为 None
+      - top3: 该期创业板50 TOP3 代码 (get_bucket_codes)
+      - ret:  该周期策略 NAV 区间收益
+      - days: 持有交易日数
+      - status: 持有中 / 已清仓
+    红利期(positions==0 / None) 跳过 —— 即"空仓等待"阶段。
+    """
+    dates = combined.get("dates", [])
+    positions = combined.get("positions", [])
+    nav = combined.get("nav", [])
+    if not (dates and positions and nav):
+        return []
+    if not (len(dates) == len(positions) == len(nav)):
+        return []
+    periods = []
+    n = len(dates)
+    i = 0
+    while i < n:
+        if positions[i] == 1:
+            start = i
+            j = i
+            while j < n and positions[j] == 1:
+                j += 1
+            end = j - 1
+            buy = dates[start]
+            sell = dates[j] if j < n else None   # 切换日(红利期首日)即卖出执行日
+            top3 = get_bucket_codes(buy)
+            ret = (nav[end] / nav[start] - 1.0) if nav[start] else 0.0
+            days = end - start + 1
+            status = "持有中" if sell is None else "已清仓"
+            periods.append({"buy": buy, "sell": sell, "top3": top3,
+                            "ret": ret, "days": days, "status": status})
+            i = j
+        else:
+            i += 1
+    return periods
+
+
 def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                        results: list[dict] | None = None,
                        annual_returns: dict | None = None,
@@ -1915,11 +1786,6 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                 f"【{idx_pair}】长期趋势（近3年）",
                 f"{sig_emoji} 当前信号：{signal}期",
             ]
-        elif chart_type == "returns":
-            return [
-                "【累计收益对比】策略 vs Buy&Hold",
-                "   粗线 > 细线 → 策略跑赢；反之跑输",
-            ]
         return [f"【{idx_pair}】"]
 
     def _calc_caption_height(lines: list[str]) -> int:
@@ -1945,7 +1811,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         _sy = y + 64
         for _sl in _sub_lines:
             draw.text((x, _sy), _sl, fill=SUBTLE_COLOR, font=font_small)
-            _sy += 44
+            _sy += 52
 
         # ── 列布局 (5 列) ──
         w_year = width * 0.11
@@ -1958,9 +1824,9 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         x_comb = x_a2 + w_a
         x_hold = x_comb + w_comb
 
-        HEADER_ROW_H = 64
-        ROW_H = 58
-        ty = y + 64 + len(_sub_lines) * 44 + 12  # 表头起始 y (含换行副标题)
+        HEADER_ROW_H = 84
+        ROW_H = 76
+        ty = y + 64 + len(_sub_lines) * 52 + 12  # 表头起始 y (含换行副标题)
 
         cyb_map = {yy: rr for yy, rr in annual_returns.get("cyb", [])}
         cyb_go_map = {yy: rr for yy, rr in annual_returns.get("cyb_go", [])}
@@ -1983,11 +1849,11 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         draw.rectangle([(x, ty), (x + width, ty + HEADER_ROW_H)], fill=(22, 27, 34))
         draw.line([(x, ty + HEADER_ROW_H), (x + width, ty + HEADER_ROW_H)],
                   fill=SEP_COLOR, width=2)
-        draw.text((x + 20, ty + 14), "年份", fill=CAPTION_COLOR, font=font_small)
-        draw.text((x_a1 + 18, ty + 14), f"创业板轮动 {cyb_term:.2f}x", fill=RED_COLOR, font=font_small)
-        draw.text((x_a2 + 18, ty + 14), f"创业板只成长 {cyb_go_term:.2f}x", fill=BLUE_COLOR, font=font_small)
-        draw.text((x_comb + 16, ty + 14), f"创红方案 {comb_term:.2f}x", fill=GOLD_COLOR, font=font_small)
-        draw.text((x_hold + 16, ty + 14), "创红方案持仓", fill=GOLD_COLOR, font=font_small)
+        draw.text((x + 20, ty + 24), "年份", fill=CAPTION_COLOR, font=font_small)
+        draw.text((x_a1 + 18, ty + 24), f"创业板轮动 {cyb_term:.2f}x", fill=RED_COLOR, font=font_small)
+        draw.text((x_a2 + 18, ty + 24), f"创业板只成长 {cyb_go_term:.2f}x", fill=BLUE_COLOR, font=font_small)
+        draw.text((x_comb + 16, ty + 24), f"创红方案 {comb_term:.2f}x", fill=GOLD_COLOR, font=font_small)
+        draw.text((x_hold + 16, ty + 24), "创红方案持仓", fill=GOLD_COLOR, font=font_small)
 
         # ── 数据行 ──
         ry = ty + HEADER_ROW_H
@@ -1995,22 +1861,22 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
             row_bg = (17, 21, 28) if i % 2 == 0 else (22, 27, 34)
             draw.rectangle([(x, ry), (x + width, ry + ROW_H)], fill=row_bg)
             yr_label = str(yr) + ("*" if yr == max_year else "")
-            draw.text((x + 20, ry + 14), yr_label, fill=CAPTION_COLOR, font=font_small)
+            draw.text((x + 20, ry + 24), yr_label, fill=CAPTION_COLOR, font=font_small)
 
             for xc, mp in [(x_a1, cyb_map), (x_a2, cyb_go_map)]:
                 if yr in mp:
                     ret = mp[yr]
                     col = RED_COLOR if ret >= 0 else GREEN_COLOR
-                    draw.text((xc + 18, ry + 14), f"{ret * 100:+.1f}%", fill=col, font=font_small)
+                    draw.text((xc + 18, ry + 24), f"{ret * 100:+.1f}%", fill=col, font=font_small)
                 else:
-                    draw.text((xc + 18, ry + 14), "—", fill=SUBTLE_COLOR, font=font_small)
+                    draw.text((xc + 18, ry + 24), "—", fill=SUBTLE_COLOR, font=font_small)
             # 创红方案收益
             if yr in comb_map:
                 ret = comb_map[yr]
                 col = RED_COLOR if ret >= 0 else GREEN_COLOR
-                draw.text((x_comb + 16, ry + 14), f"{ret * 100:+.1f}%", fill=col, font=font_small)
+                draw.text((x_comb + 16, ry + 24), f"{ret * 100:+.1f}%", fill=col, font=font_small)
             else:
-                draw.text((x_comb + 16, ry + 14), "—", fill=SUBTLE_COLOR, font=font_small)
+                draw.text((x_comb + 16, ry + 24), "—", fill=SUBTLE_COLOR, font=font_small)
             # 创红方案持仓 (列宽不足时自动缩字号, 避免文字截断)
             if yr in comb_hold:
                 _htxt = comb_hold[yr]
@@ -2021,93 +1887,88 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                         _hf = _load_font(30)
                 except Exception:
                     pass
-                draw.text((x_hold + 16, ry + 14), _htxt, fill=CAPTION_COLOR, font=_hf)
+                draw.text((x_hold + 16, ry + 24), _htxt, fill=CAPTION_COLOR, font=_hf)
             else:
-                draw.text((x_hold + 16, ry + 14), "—", fill=SUBTLE_COLOR, font=font_small)
+                draw.text((x_hold + 16, ry + 24), "—", fill=SUBTLE_COLOR, font=font_small)
             ry += ROW_H
 
         # ── 竖网格线 ──
         for xg in [x, x_year_end, x_a1, x_a2, x_comb, x_hold, x + width]:
             draw.line([(xg, ty), (xg, ry)], fill=SEP_COLOR, width=1)
 
-    def _draw_rebalance_history(draw, x: int, y: int, width: int, combined: dict):
-        """创业板50 TOP3 调仓历史表: 每6个月一期, 列明生效日 / TOP3全名 / 该期状态。
+    def _draw_holding_periods(draw, x: int, y: int, width: int, periods: list[dict]):
+        """创红方案 持仓周期表: 每个成长期持仓周期一行。
 
-        直接解决'持仓只显示半年'的困惑——按调仓期(而非按自然年)展示,
-        并标注每期内'成长期持有天数 / 红利期空仓天数'。
+        列: 买入日期 | 卖出日期 | 持有TOP3 | 区间收益 | 持有天数 | 状态(是否等)
+        红利期=空仓等待(持币, 收益=0); 成长期=满仓持有当期TOP3等权。
         """
-        draw.text((x, y), "创红方案 调仓历史（每6个月一期）",
+        draw.text((x, y), "创红方案 持仓周期表（每次买入 → 卖出）",
                   fill=CAPTION_COLOR, font=font_section)
-        sub = ("蓝字=成长期持有天数(持该期TOP3等权); 红字=红利期空仓天数(持币, 收益=0, 非缺数据)。"
-               "该期状态 = 期内成长期天数 / 空仓天数。")
-        draw.text((x, y + 64), sub, fill=SUBTLE_COLOR, font=font_small)
+        sub = ("红利期=空仓等待(持币, 收益=0); 成长期=满仓持有当期TOP3等权。"
+               "买入/卖出日期均为信号次日开盘执行。")
+        _sy = y + 64
+        for _sl in wrap_text(sub, font_small, width - 8):
+            draw.text((x, _sy), _sl, fill=SUBTLE_COLOR, font=font_small)
+            _sy += 44
 
-        def _tw(s_):
-            try:
-                return draw.textlength(s_, font=font_small)
-            except Exception:
-                return font_small.getsize(s_)[0]
+        # ── 6 列布局 ──
+        w_buy = width * 0.15
+        w_sell = width * 0.15
+        w_top3 = width * 0.35
+        w_ret = width * 0.13
+        w_days = width * 0.10
+        w_status = width - (w_buy + w_sell + w_top3 + w_ret + w_days)
+        x_buy = x
+        x_sell = x + w_buy
+        x_top3 = x_sell + w_sell
+        x_ret = x_top3 + w_top3
+        x_days = x_ret + w_ret
+        x_status = x_days + w_days
 
-        periods = sorted(SCHEDULE.keys())
-        dates = combined.get("dates", [])
-        positions = combined.get("positions", [])
-        stats = []
-        for i, sd in enumerate(periods):
-            nd = periods[i + 1] if i + 1 < len(periods) else "9999-12-31"
-            g = e = 0
-            for d, p in zip(dates, positions):
-                if p is None:
-                    continue
-                if sd <= d < nd:
-                    if p == 1:
-                        g += 1
-                    else:
-                        e += 1
-            stats.append((sd, SCHEDULE[sd], g, e))
-
-        HEADER_ROW_H = 60
-        ROW_H = 50
-        ty = y + 110
-        w_date = width * 0.20
-        w_top3 = width * 0.50
-        w_status = width - w_date - w_top3
-        x_date_end = x + w_date
-        x_top3 = x_date_end
-        x_status = x_top3 + w_top3
+        HEADER_ROW_H = 84
+        ROW_H = 76
+        ty = y + 64 + len(wrap_text(sub, font_small, width - 8)) * 44 + 12
 
         draw.rectangle([(x, ty), (x + width, ty + HEADER_ROW_H)], fill=(22, 27, 34))
         draw.line([(x, ty + HEADER_ROW_H), (x + width, ty + HEADER_ROW_H)],
                   fill=SEP_COLOR, width=2)
-        draw.text((x + 16, ty + 14), "生效日", fill=CAPTION_COLOR, font=font_small)
-        draw.text((x_top3 + 16, ty + 14), "TOP3（全名·等权）", fill=CAPTION_COLOR, font=font_small)
-        draw.text((x_status + 16, ty + 14), "该期状态", fill=CAPTION_COLOR, font=font_small)
+        _hx = ty + 24
+        draw.text((x_buy + 16, _hx), "买入日期", fill=CAPTION_COLOR, font=font_small)
+        draw.text((x_sell + 16, _hx), "卖出日期", fill=CAPTION_COLOR, font=font_small)
+        draw.text((x_top3 + 16, _hx), "持有TOP3（等权）", fill=CAPTION_COLOR, font=font_small)
+        draw.text((x_ret + 16, _hx), "区间收益", fill=CAPTION_COLOR, font=font_small)
+        draw.text((x_days + 16, _hx), "持有天数", fill=CAPTION_COLOR, font=font_small)
+        draw.text((x_status + 16, _hx), "状态(是否等)", fill=CAPTION_COLOR, font=font_small)
 
         ry = ty + HEADER_ROW_H
-        for i, (sd, codes, g, e) in enumerate(stats):
+        for i, p in enumerate(periods):
             row_bg = (17, 21, 28) if i % 2 == 0 else (22, 27, 34)
             draw.rectangle([(x, ry), (x + width, ry + ROW_H)], fill=row_bg)
-            names = "/".join(STOCK_NAMES.get(c, c) for c in codes)
-            draw.text((x + 16, ry + 10), sd, fill=CAPTION_COLOR, font=font_small)
-            draw.text((x_top3 + 16, ry + 10), names, fill=CAPTION_COLOR, font=font_small)
-            # 状态下分色: 成长=蓝, 空仓=红 (同一单元格两段分别着色, 不再整行单色)
-            sx = x_status + 16
-            sy = ry + 10
-            if g == 0 and e == 0:
-                draw.text((sx, sy), "（无交易数据）", fill=SUBTLE_COLOR, font=font_small)
-            elif e == 0:
-                draw.text((sx, sy), f"全程持有 {g}天", fill=BLUE_COLOR, font=font_small)
-            elif g == 0:
-                draw.text((sx, sy), f"全程空仓 {e}天", fill=RED_COLOR, font=font_small)
-            else:
-                s1, s2, s3 = f"成长{g}天", " / ", f"空仓{e}天"
-                draw.text((sx, sy), s1, fill=BLUE_COLOR, font=font_small)
-                w1 = _tw(s1)
-                draw.text((sx + w1, sy), s2, fill=SUBTLE_COLOR, font=font_small)
-                w2 = _tw(s2)
-                draw.text((sx + w1 + w2, sy), s3, fill=RED_COLOR, font=font_small)
+            ry24 = ry + 24
+            draw.text((x_buy + 16, ry24), p["buy"], fill=CAPTION_COLOR, font=font_small)
+            _selling = p["sell"] if p["sell"] else "持有中"
+            draw.text((x_sell + 16, ry24), _selling,
+                      fill=BLUE_COLOR if p["sell"] is None else CAPTION_COLOR, font=font_small)
+            names = "/".join(STOCK_NAMES.get(c, c) for c in p["top3"])
+            _hf = font_small
+            _avail = w_top3 - 32
+            try:
+                if draw.textlength(names, font=font_small) > _avail:
+                    _hf = _load_font(30)
+            except Exception:
+                pass
+            draw.text((x_top3 + 16, ry24), names, fill=CAPTION_COLOR, font=_hf)
+            ret = p["ret"]
+            _rc = RED_COLOR if ret >= 0 else GREEN_COLOR
+            draw.text((x_ret + 16, ry24), f"{ret * 100:+.1f}%", fill=_rc, font=font_small)
+            draw.text((x_days + 16, ry24), f"{p['days']}天", fill=CAPTION_COLOR, font=font_small)
+            _st = p["status"]
+            _sc = BLUE_COLOR if _st == "持有中" else SUBTLE_COLOR
+            draw.text((x_status + 16, ry24), _st, fill=_sc, font=font_small)
             ry += ROW_H
 
-        for xg in [x, x_date_end, x_top3, x_status, x + width]:
+        for xg in [x, x_buy + w_buy, x_sell + w_sell, x_top3 + w_top3,
+                   x_ret + w_ret, x_days + w_days, x + width]:
             draw.line([(xg, ty), (xg, ry)], fill=SEP_COLOR, width=1)
 
     # ── 计算总高度 ──
@@ -2123,8 +1984,6 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                 caption_lines = _gen_caption(idx_pair, "short", r)
             elif "长期" in title_key:
                 caption_lines = _gen_caption(idx_pair, "long", r)
-            elif "累计收益" in title_key:
-                caption_lines = _gen_caption("", "returns", r)
             else:
                 caption_lines = [title_key]
         else:
@@ -2146,14 +2005,20 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
             _sub_text = (f"按自然年 · 涨红跌绿 · 末行*为年内至今(截至 YYYY-MM-DD) · "
                          f"空仓=红利期主动持币(收益=0, 非缺数据)")
             _sub_n = len(wrap_text(_sub_text, font_small, uniform_w - 2 * BORDER - 8))
-            annual_height = 64 + _sub_n * 44 + 12 + 64 + _row_count * 58 + 30
+            annual_height = 64 + _sub_n * 52 + 12 + 84 + _row_count * 76 + 30
             total_h += BORDER + annual_height
 
-    # ── 调仓历史表预留高度 ──
+    # ── 持仓周期表预留高度 ──
     history_height = 0
+    holding_periods = []
     if combined:
-        _n_periods = len(SCHEDULE)
-        history_height = 110 + 60 + _n_periods * 50 + 30
+        holding_periods = _compute_holding_periods(combined)
+        _n = len(holding_periods)
+        _w = uniform_w - 2 * BORDER
+        _sub_text = ("红利期=空仓等待(持币, 收益=0); 成长期=满仓持有当期TOP3等权。"
+                     "买入/卖出日期均为信号次日开盘执行。")
+        _sub_n = len(wrap_text(_sub_text, font_small, _w - 8))
+        history_height = 64 + _sub_n * 44 + 12 + 84 + _n * 76 + 30
         total_h += BORDER + history_height
 
     # ── 创建画布 ──
@@ -2236,7 +2101,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     draw.text((BORDER, y), "  仅供研究参考，不构成投资建议",
               fill=SUBTLE_COLOR, font=font_small)
     y += 50
-    draw.text((BORDER, y), "  ↓ 短期趋势 → 长期全景 → 累计收益",
+    draw.text((BORDER, y), "  ↓ 短期趋势 → 长期全景",
               fill=SUBTLE_COLOR, font=font_small)
 
     # ── 创红方案篮子信息块 ──
@@ -2290,8 +2155,6 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                 caption_lines = _gen_caption(idx_pair, "short", r)
             elif "长期" in title_key:
                 caption_lines = _gen_caption(idx_pair, "long", r)
-            elif "累计收益" in title_key:
-                caption_lines = _gen_caption("", "returns", r)
             else:
                 caption_lines = [title_key]
         else:
@@ -2346,7 +2209,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         y_offset += annual_height
     if combined:
         y_offset += BORDER // 2
-        _draw_rebalance_history(draw, BORDER, y_offset, uniform_w - 2 * BORDER, combined)
+        _draw_holding_periods(draw, BORDER, y_offset, uniform_w - 2 * BORDER, holding_periods)
         y_offset += history_height
 
     canvas.save(save_path, "PNG")
@@ -2463,19 +2326,11 @@ def main():
     prep = prepare_backtest_data()
     cyb_annual, cyb_go_annual = [], []
     date_str = datetime.now().strftime("%Y%m%d")
-    combined_returns_path = None
 
-    if prep is None:
-        print("  [跳过] 累计收益图数据不足")
-    else:
-        combined_returns_path = str(CACHE_DIR / f"chart_combined_returns_{date_str}.png")
-        try:
-            combined_returns_path, cyb_annual, cyb_go_annual = plot_combined_returns_chart(
-                prep, all_results, combined_returns_path)
-            all_chart_files.append(("累计收益对比 — 策略曲线", combined_returns_path))
-        except Exception as e:
-            print(f"  合并收益图生成失败: {e}")
-            combined_returns_path = None
+    # 年度表数据源直接从 prep 取 (累计收益对比图已移除: 用户认为无用)
+    if prep:
+        cyb_annual = prep.get("cyb_annual", [])
+        cyb_go_annual = prep.get("cyb_go_annual", [])
 
     # 生成『创业板只做成长』曲线+逐年收益图 (接入每日报告)
     if prep is None:
@@ -2510,8 +2365,7 @@ def main():
 
     # 写入合并摘要
     summary = "\n\n".join(all_briefs)
-    if combined_returns_path:
-        summary += f"\n\n📊 合并大图: {composed_path}"
+    summary += f"\n\n📊 合并大图: {composed_path}"
     (CACHE_DIR / "latest_summary.txt").write_text(summary, encoding="utf-8")
     print("\n\n" + summary)
 
