@@ -1691,11 +1691,16 @@ def get_current_basket_info() -> dict:
     ]
     if today.month in (5, 11) and today.day >= 20:
         key_dates.append("关注国证调样公告（通常生效前约2周发布）")
+    # 新纳入个股提醒: 当前期 TOP3 相对上一期新增的个股 (报告高亮/预警用)
+    _exec_keys = sorted(SCHEDULE.keys())
+    _ci = _exec_keys.index(cur_exec) if cur_exec in _exec_keys else len(_exec_keys) - 1
+    _prev_codes = SCHEDULE[_exec_keys[_ci - 1]] if _ci > 0 else []
+    new_entries = [c for c in hard if c not in _prev_codes]
     return {
         "top3": top3, "source": source, "note": note,
         "next_rebalance": next_exec, "days_left": days_left_exec,
         "next_effective": eff.isoformat(), "days_left_effective": days_left,
-        "key_dates": key_dates,
+        "key_dates": key_dates, "new_entries": new_entries,
     }
 
 
@@ -2108,7 +2113,8 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         draw.text((x, y), "创红方案 持仓周期表（每次买入 → 卖出）",
                   fill=CAPTION_COLOR, font=font_section)
         sub = ("红利期=空仓等待(持币, 收益=0); 成长期=满仓持有当期TOP3等权。"
-               "买入/卖出日期均为信号次日开盘执行。")
+               "买入/卖出日期均为信号次日开盘执行。"
+               "★金色 = 本期新纳入TOP3（相较上一持有期）。")
         _sy = y + 64
         for _sl in wrap_text(sub, font_small, width - 8):
             draw.text((x, _sy), _sl, fill=SUBTLE_COLOR, font=font_small)
@@ -2154,6 +2160,8 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
             _selling = p["sell"] if p["sell"] else "持有中"
             draw.text((x_sell + 16, ry24), _selling,
                       fill=BLUE_COLOR if p["sell"] is None else CAPTION_COLOR, font=font_small)
+            # 新纳入个股高亮: 本期相对上一持有期篮子新增的个股标金色★
+            prev_top3 = periods[i + 1]["top3"] if i + 1 < len(periods) else []
             names = "/".join(STOCK_NAMES.get(c, c) for c in p["top3"])
             _hf = font_small
             _avail = w_top3 - 32
@@ -2162,7 +2170,25 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                     _hf = _load_font(30)
             except Exception:
                 pass
-            draw.text((x_top3 + 16, ry24), names, fill=CAPTION_COLOR, font=_hf)
+            # 逐个绘制名称, 新纳入者金色高亮并加★标识
+            _cx = x_top3 + 16
+            for _ci2, _c in enumerate(p["top3"]):
+                _nm = STOCK_NAMES.get(_c, _c)
+                _is_new = _c not in prev_top3
+                _label = _nm + (" ★" if _is_new else "")
+                draw.text((_cx, ry24), _label,
+                          fill=GOLD_COLOR if _is_new else CAPTION_COLOR, font=_hf)
+                try:
+                    _w = draw.textlength(_label, font=_hf)
+                except Exception:
+                    _w = 60
+                _cx += _w
+                if _ci2 < len(p["top3"]) - 1:
+                    draw.text((_cx, ry24), " /", fill=CAPTION_COLOR, font=_hf)
+                    try:
+                        _cx += draw.textlength(" /", font=_hf)
+                    except Exception:
+                        _cx += 18
             ret = p["ret"]
             _rc = RED_COLOR if ret >= 0 else GREEN_COLOR
             draw.text((x_ret + 16, ry24), f"{ret * 100:+.1f}%", fill=_rc, font=font_small)
@@ -2297,6 +2323,12 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                   f"距离下次 TOP3 调整发布日期还剩 {_dl} 天", fill=GOLD_COLOR, font=font_sub)
         y += 80
         draw.text((BORDER, y), f"发布日期: {_ne}", fill=CAPTION_COLOR, font=font_sub)
+        y += 80
+        _new = basket_info.get("new_entries")
+        if _new:
+            _nm = "、".join(STOCK_NAMES.get(c, c) for c in _new)
+            draw.text((BORDER, y), f"★ 本期待新纳入 TOP3：{_nm}",
+                      fill=GOLD_COLOR, font=font_sub)
     else:
         draw.text((BORDER, y), "（篮子信息获取中…）", fill=SUBTLE_COLOR, font=font_sub)
 
