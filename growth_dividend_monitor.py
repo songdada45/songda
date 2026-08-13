@@ -405,6 +405,14 @@ def get_bucket_codes(date_str, schedule=SCHEDULE):
     return schedule[best]
 
 
+def _resolve_bucket(date_str: str, override: dict | None = None) -> list:
+    """统一解析某日应持 TOP3: 国证已变更且属当前期时, 用 override 实时名单;
+    否则用硬编码 SCHEDULE。override = {"from": 执行日, "codes": [...]}。"""
+    if override and date_str >= override.get("from", ""):
+        return override["codes"]
+    return get_bucket_codes(date_str)
+
+
 def align_to_master_basket(recs, master_dates, zero_after_last=True):
     """把个股/指数日线对齐到 master_dates; 历史缺口前Fill, 末日之后→0(退市)."""
     by = {r["date"]: r for r in recs}
@@ -434,7 +442,8 @@ def align_to_master_basket(recs, master_dates, zero_after_last=True):
 
 
 def simulate_enhanced(master_dates, sig_by_date, stock_open, stock_close,
-                      div_open, div_close, div_on, schedule=SCHEDULE):
+                      div_open, div_close, div_on, schedule=SCHEDULE,
+                      top3_override=None):
     """创红方案净值模拟: 开盘价执行, T-1收盘信号→T开盘; 含 ONE_WAY_FEE; 退市→末日后0。
 
     - div_on=False: 红利期空仓(=1.0)  ← 创红方案采用此口径
@@ -458,7 +467,7 @@ def simulate_enhanced(master_dates, sig_by_date, stock_open, stock_close,
     nav = [1.0] * n
     positions = [None] * n
     if init == 1:
-        codes = get_bucket_codes(master_dates[trade_date])
+        codes = _resolve_bucket(master_dates[trade_date], top3_override)
         o0, c0 = basket_oc(trade_date, codes)
         nav0 = (c0 / o0) * (1 - ONE_WAY_FEE)
         cur_codes = codes
@@ -485,7 +494,7 @@ def simulate_enhanced(master_dates, sig_by_date, stock_open, stock_close,
             o_cur, c_cur = basket_oc(i, cur_codes)
             ov = o_cur / c_prev
             if tgt == 1:
-                new_codes = get_bucket_codes(master_dates[i], schedule)
+                new_codes = _resolve_bucket(master_dates[i], top3_override)
                 if new_codes != cur_codes:
                     o1n, c1n = basket_oc(i, new_codes)
                     idr = (1 - ONE_WAY_FEE) * (c1n / o1n)
@@ -519,7 +528,7 @@ def simulate_enhanced(master_dates, sig_by_date, stock_open, stock_close,
                     idr = 1.0
                 dayfac = ov * idr
             else:
-                codes = get_bucket_codes(master_dates[i], schedule)
+                codes = _resolve_bucket(master_dates[i], top3_override)
                 o1, c1 = basket_oc(i, codes)
                 dayfac = ov * (1 - ONE_WAY_FEE) * (c1 / o1)
                 cur_codes = codes
@@ -1475,7 +1484,7 @@ def _extend_index_with_fresh(market: str, code: str, recs: list) -> list:
     return recs
 
 
-def compute_combined_strategy() -> dict | None:
+def compute_combined_strategy(top3_override=None) -> dict | None:
     """创红方案(创业板50 TOP3 篮子 × 红利信号)净值/逐年收益/逐年持仓。
 
     信号源: 创业板指(399006) vs 中证红利(000922) 缓冲均线 (与线上 24.06x 基线同口径)。
@@ -1526,7 +1535,8 @@ def compute_combined_strategy() -> dict | None:
             stock_close[code] = c
 
         nav, positions = simulate_enhanced(master_dates, sig_by_date,
-                                           stock_open, stock_close, None, None, False)
+                                           stock_open, stock_close, None, None, False,
+                                           top3_override=top3_override)
 
         dates_dt = [dt.strptime(d, "%Y-%m-%d") for d in master_dates]
         combined_annual = compute_annual_returns(dates_dt, nav)
@@ -1541,7 +1551,7 @@ def compute_combined_strategy() -> dict | None:
             yr = int(d[:4])
             if positions[i] == 1:
                 year_growth[yr] += 1
-                year_buckets[yr].add(tuple(get_bucket_codes(d)))
+                year_buckets[yr].add(tuple(_resolve_bucket(d, top3_override)))
             else:
                 year_empty[yr] += 1
 
@@ -1625,7 +1635,11 @@ def fetch_cyb50_top3() -> list | None:
                     continue
         if not recs:
             return None
-        return sorted(recs, key=lambda x: x["weight"], reverse=True)[:3]
+        # 取「最新快照日」的前3权重股 —— 防御: 国证若返回多日历史样本,
+        # 绝不能跨全历史取最高权重股(会得到历史最高权重成分, 而非当前TOP3)。
+        latest_date = max(r["date"] for r in recs)
+        latest = [r for r in recs if r["date"] == latest_date]
+        return sorted(latest, key=lambda x: x["weight"], reverse=True)[:3]
     except Exception as e:
         print(f"  [资讯联动] 国证官网抓取失败: {e}")
         return None
@@ -1667,6 +1681,7 @@ def get_current_basket_info() -> dict:
     live = fetch_cyb50_top3()
     hard = get_bucket_codes(tstr)
     live_codes = [x["code"] for x in live] if live else []
+    live_date = live[0]["date"] if live else ""
     match = (set(live_codes) == set(hard)) if live else False
 
     if live:
@@ -1695,18 +1710,148 @@ def get_current_basket_info() -> dict:
     _exec_keys = sorted(SCHEDULE.keys())
     _ci = _exec_keys.index(cur_exec) if cur_exec in _exec_keys else len(_exec_keys) - 1
     _prev_codes = SCHEDULE[_exec_keys[_ci - 1]] if _ci > 0 else []
-    new_entries = [c for c in hard if c not in _prev_codes]
+    # 以「实时(国证)或硬编码」当前期为准计算新增 (国证变更时高亮更准确)
+    _base = live_codes if live else hard
+    new_entries = [c for c in _base if c not in _prev_codes]
     return {
         "top3": top3, "source": source, "note": note,
+        "live_codes": live_codes, "live_date": live_date, "match": match,
+        "schedule_codes": hard, "cur_exec": cur_exec,
         "next_rebalance": next_exec, "days_left": days_left_exec,
         "next_effective": eff.isoformat(), "days_left_effective": days_left,
         "key_dates": key_dates, "new_entries": new_entries,
     }
 
 
+# ─── 数据准确性校验层 (每次运行必跑, 确保 TOP3 与各价格最新且一致) ──
+
+def _last_trading_day(as_of=None) -> "date":
+    """as_of(默认今天) 当日或之前最近的交易日(跳过周末)。"""
+    d = as_of or date.today()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def _cache_latest_date(cf) -> str:
+    """读取缓存 json 的最新日期; 失败返回 ''。"""
+    try:
+        if cf.exists():
+            d = json.loads(cf.read_text(encoding="utf-8"))
+            recs = d.get("records") if isinstance(d, dict) else None
+            if recs:
+                return max((r.get("date", "") for r in recs if r.get("date")), default="")
+    except Exception:
+        pass
+    return ""
+
+
+def _days_old(ld: str, today: "date") -> int:
+    if not ld:
+        return 999
+    try:
+        return (today - date.fromisoformat(ld)).days
+    except Exception:
+        return 999
+
+
+def verify_data_freshness(basket_info: dict | None = None) -> dict:
+    """数据准确性校验层: 每次运行实测 TOP3(国证实时) / 指数价 / 个股价 新鲜度与一致性。
+
+    返回结构化结果供报告头/飞书展示, overall ∈ {OK, WARN, CRITICAL}:
+      - TOP3: 国证实时抓取 ↔ 硬编码 SCHEDULE 交叉核对。
+          · VERIFIED        国证与名单一致
+          · UNVERIFIED      国证抓取失败(无法联网验证, 名单为硬编码兜底)
+          · MISMATCH_CRITICAL 国证已变更但名单未同步 → 影响收益
+      - 指数/个股价: 比对缓存最新日与「最近交易日」, 滞后→STALE。
+    CRITICAL 且属当前期时, 主流程改用国证实时 TOP3 计算当前开放期(绝不静默用旧名单)。
+    """
+    today = date.today()
+    expected = _last_trading_day(today)
+    expected_str = expected.strftime("%Y-%m-%d")
+    msgs = []
+
+    # ── 1. TOP3 (国证官网实时) ──
+    live = basket_info.get("live_codes") if basket_info else None
+    live_date = basket_info.get("live_date", "") if basket_info else ""
+    hard = basket_info.get("schedule_codes") if basket_info else get_bucket_codes(today.strftime("%Y-%m-%d"))
+    match = basket_info.get("match", False) if basket_info else False
+    cur_exec = basket_info.get("cur_exec") if basket_info else max(
+        (k for k in SCHEDULE if k <= today.strftime("%Y-%m-%d")), default=min(SCHEDULE))
+
+    if live is None:
+        top3_state = "UNVERIFIED"
+        top3_detail = "国证官网抓取失败 → TOP3 沿用硬编码名单(未经联网验证)"
+        msgs.append("⚠ TOP3 未经联网验证: 国证官网抓取失败, 当前名单为硬编码兜底")
+        live_le_cur = False
+    elif match:
+        top3_state = "VERIFIED"
+        top3_detail = f"国证官网 {live_date} 与硬编码名单一致 ✓"
+        live_le_cur = True
+    else:
+        # 国证快照晚于当前执行期 → 属「未来期已公布」(不应误用); 否则属「当前期已变更」
+        live_le_cur = (live_date <= cur_exec)
+        if live_le_cur:
+            top3_state = "MISMATCH_CRITICAL"
+            top3_detail = (f"⚠ 国证 {live_date} 已变更为 {live} 但硬编码名单仍为 {hard} "
+                           f"→ 当前开放期改按国证实时TOP3计算")
+            msgs.append(f"⚠【关键】国证TOP3已更新({live_date})但名单未同步, 已改用实时TOP3算当前期")
+        else:
+            top3_state = "MISMATCH_CRITICAL"
+            top3_detail = (f"⚠ 国证 {live_date} 公布未来期TOP3 {live}, 当前名单 {hard} 未更新 "
+                           f"→ 请同步SCHEDULE; 当前收益仍按现名单(避免误用未来期)")
+            msgs.append(f"⚠【关键】国证已公布未来期TOP3({live_date}), 请更新SCHEDULE名单")
+
+    # ── 2. 指数价 (创业板指 / 中证红利) ──
+    idx_stale = []
+    for code in ("399006", "000922"):
+        ld = _cache_latest_date(CACHE_DIR / f"{code}.json")
+        fresh = (ld >= expected_str) or _days_old(ld, today) <= 4
+        if not fresh:
+            idx_stale.append(f"{code}({ld})")
+            msgs.append(f"⚠ 指数 {code} 价格停留在 {ld}, 期望 ≤ {expected_str}")
+    idx_state = "OK" if not idx_stale else "STALE"
+
+    # ── 3. 个股价 (当前 TOP3 个股; 399673 创业板50指数不参与收益计算, 不查) ──
+    check_codes = list(dict.fromkeys(live or hard))
+    basket_stale = []
+    for code in check_codes:
+        cf = BASKET_CACHE_DIR / f"sz{code}_hfq.json"
+        if not cf.exists():
+            cf = BASKET_CACHE_DIR / f"sz{code}_qfq.json"
+        ld = _cache_latest_date(cf)
+        fresh = (ld >= expected_str) or _days_old(ld, today) <= 4
+        if not fresh:
+            basket_stale.append(f"{code}({ld})")
+            msgs.append(f"⚠ 个股 {code} 价格停留在 {ld}, 期望 ≤ {expected_str}")
+    basket_state = "OK" if not basket_stale else "STALE"
+
+    # ── 汇总 ──
+    if top3_state == "MISMATCH_CRITICAL" or idx_state == "STALE" or basket_state == "STALE":
+        overall = "CRITICAL"
+    elif top3_state == "UNVERIFIED":
+        overall = "WARN"
+    else:
+        overall = "OK"
+
+    return {
+        "overall": overall,
+        "top3": {"state": top3_state, "detail": top3_detail,
+                 "live_codes": live or [], "live_date": live_date,
+                 "schedule_codes": hard, "match": match,
+                 "cur_exec": cur_exec, "live_le_cur_period": live_le_cur},
+        "index": {"state": idx_state, "expected": expected_str, "stale": idx_stale},
+        "basket": {"state": basket_state, "expected": expected_str, "stale": basket_stale,
+                   "checked": check_codes},
+        "expected_trading_day": expected_str,
+        "today": today.strftime("%Y-%m-%d"),
+        "messages": msgs,
+    }
+
+
 # ─── 合成图: 所有图表纵向拼接为一张大图 ─────────────────
 
-def _compute_holding_periods(combined: dict) -> list[dict]:
+def _compute_holding_periods(combined: dict, top3_override=None) -> list[dict]:
     """从创红方案 NAV/仓位 提取每个成长期持仓周期。
 
     返回每行: {buy, sell, top3, ret, days, status}
@@ -1738,7 +1883,7 @@ def _compute_holding_periods(combined: dict) -> list[dict]:
             exit_idx = j if j < n else end   # 有卖出日则取到红利期首日(含开盘卖出那一跳)
             buy = dates[start]
             sell = dates[j] if j < n else None   # 切换日(红利期首日)即卖出执行日
-            top3 = get_bucket_codes(buy)
+            top3 = _resolve_bucket(buy, top3_override)
             # ret 口径: 含入场日开盘->收盘那一跳(nav[start-1]=入场前一日市值),
             #          并含红利期首日开盘卖出那一跳(nav[exit_idx]); 真实已实现收益。
             prev = nav[start - 1] if start > 0 else nav[start]
@@ -1846,7 +1991,8 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                        results: list[dict] | None = None,
                        annual_returns: dict | None = None,
                        combined: dict | None = None,
-                       basket_info: dict | None = None):
+                       basket_info: dict | None = None,
+                       freshness: dict | None = None):
     """将多张图表纵向拼接为一张大图，每张图前加详细数据说明，顶部加摘要
 
     针对手机端阅读优化：使用大字号、每张图前提供数据驱动的多行描述
@@ -1856,7 +2002,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     from PIL import Image, ImageDraw, ImageFont
 
     BORDER = 50          # 边距（加大）
-    HEADER_HEIGHT = 560   # 顶部摘要区（持仓 + 数据日期 + 下次发布倒计时）
+    HEADER_HEIGHT = 700   # 顶部摘要区（持仓 + 数据日期 + 下次发布倒计时 + 数据校验条）
     BG_COLOR = (13, 17, 23)         # #0d1117
     CAPTION_COLOR = (230, 237, 243)  # #e6edf3
     SEP_COLOR = (48, 54, 61)         # #30363d
@@ -2332,6 +2478,25 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     else:
         draw.text((BORDER, y), "（篮子信息获取中…）", fill=SUBTLE_COLOR, font=font_sub)
 
+    # ── 数据准确性校验状态条 ──
+    if freshness:
+        _fy = y + 24
+        _ov = freshness.get("overall", "OK")
+        _col = {"OK": GREEN_COLOR, "WARN": GOLD_COLOR, "CRITICAL": RED_COLOR}.get(_ov, GREEN_COLOR)
+        _t3 = freshness["top3"]
+        if _ov == "OK":
+            _txt = (f"✓ 数据校验通过 · TOP3(国证{_t3.get('live_date','?')})已联网验证"
+                    f" · 指数/个股价至 {freshness['expected_trading_day']}")
+        else:
+            _idx = freshness["index"]["state"]
+            _bk = freshness["basket"]["state"]
+            _txt = (f"⚠ 数据校验{('未通过' if _ov=='CRITICAL' else '提醒')} · "
+                    f"TOP3:{_t3['state']} · 指数:{_idx} · 个股:{_bk}"
+                    + (f" · {_t3.get('detail','')}" if _t3['state'].startswith('MISMATCH') else ""))
+        draw.rectangle([(BORDER, _fy - 8), (uniform_w - BORDER, _fy + 64)],
+                       fill=(20, 27, 34), outline=_col, width=3)
+        draw.text((BORDER + 20, _fy), _txt, fill=_col, font=font_sub)
+
     y_offset = HEADER_HEIGHT
 
     # ════════════════════════════════════════════
@@ -2501,9 +2666,31 @@ def main():
         print(f"  [资讯联动] 异常: {e}")
         basket_info = None
 
+    # 数据准确性校验层: 实测 TOP3(国证实时)/指数价/个股价 新鲜度与一致性
+    # 早期跑一次: 仅用 TOP3 部分(国证联网, 不依赖价格缓存)决定开放期是否改用实时名单;
+    # 价格新鲜度在「指数/个股缓存本轮刷新后」再跑一次(见下方), 以保证校验准确。
+    try:
+        fres_early = verify_data_freshness(basket_info)
+    except Exception as e:
+        print(f"  [数据校验] 异常: {e}")
+        fres_early = None
+    top3_override = None
+    if fres_early and fres_early["top3"]["state"] == "MISMATCH_CRITICAL" \
+            and fres_early["top3"].get("live_le_cur_period"):
+        # 国证已变更且属当前期 → 当前开放期改用国证实时TOP3(避免用旧名单算收益)
+        top3_override = {"from": fres_early["top3"]["cur_exec"],
+                         "codes": fres_early["top3"]["live_codes"]}
+    if fres_early:
+        _fv = fres_early["overall"]
+        print(f"\n  [数据校验·TOP3] 总评={_fv}  TOP3={fres_early['top3']['state']}")
+        if fres_early["top3"]["state"] == "MISMATCH_CRITICAL":
+            print("  [数据校验] ⚠ " + " | ".join(fres_early["messages"]))
+        if top3_override:
+            print(f"  [数据校验] 当前开放期改用国证实时TOP3: {top3_override['codes']}")
+
     # 先算创红方案(含每段成长盈利映射), 供趋势图成长标记按盈亏着色
     try:
-        combined = compute_combined_strategy()
+        combined = compute_combined_strategy(top3_override=top3_override)
     except Exception as e:
         print(f"  [创红方案] 异常: {e}")
         combined = None
@@ -2538,7 +2725,7 @@ def main():
     # (已在 analyze 前计算并供趋势图着色; 此处仅在异常时为 None 时补算)
     if combined is None:
         try:
-            combined = compute_combined_strategy()
+            combined = compute_combined_strategy(top3_override=top3_override)
         except Exception as e:
             print(f"  [创红方案] 异常: {e}")
             combined = None
@@ -2549,7 +2736,7 @@ def main():
     # 逐笔交易收益率图 (第三张图: 散点+橘黄连线+年度收益柱融合)
     if combined:
         try:
-            holding_periods = _compute_holding_periods(combined)
+            holding_periods = _compute_holding_periods(combined, top3_override=top3_override)
             trade_ret_path = str(CACHE_DIR / f"chart_trade_returns_{date_str}.png")
             # 年度收益(只做成长口径, 与逐笔交易融合)
             trade_annual = []
@@ -2574,6 +2761,22 @@ def main():
         except Exception as e:
             print(f"  [逐笔交易图] 生成失败: {e}")
 
+    # ── 数据准确性校验(价格缓存本轮已刷新, 此时校验才准确) ──
+    try:
+        freshness = verify_data_freshness(basket_info)
+    except Exception as e:
+        print(f"  [数据校验] 异常: {e}")
+        freshness = fres_early
+    if freshness:
+        _fv = freshness["overall"]
+        print(f"\n  [数据校验·全量] 总评={_fv}  TOP3={freshness['top3']['state']}  "
+              f"指数={freshness['index']['state']}  个股={freshness['basket']['state']}"
+              f"  期望最新交易日={freshness['expected_trading_day']}")
+        if _fv != "OK":
+            print("  [数据校验] ⚠ " + " | ".join(freshness["messages"]))
+            if _fv == "CRITICAL":
+                print("  [数据校验] 🛑 存在关键数据不一致, 报告已红色标注; 收益可能因名单/价格偏差而不准!")
+
     # ── 合成大图 ──
     composed_path = str(CACHE_DIR / f"chart_all_in_one_{date_str}.png")
     annual_dict = {"cyb": cyb_annual, "cyb_go": cyb_go_annual}
@@ -2581,11 +2784,25 @@ def main():
         annual_dict["combined"] = combined["combined_annual"]
         annual_dict["combined_hold"] = combined["combined_holdings"]
     compose_all_charts(all_chart_files, composed_path, results=all_results,
-                       annual_returns=annual_dict, combined=combined, basket_info=basket_info)
+                       annual_returns=annual_dict, combined=combined,
+                       basket_info=basket_info, freshness=freshness)
 
     # 写入合并摘要
     summary = "\n\n".join(all_briefs)
     summary += f"\n\n📊 合并大图: {composed_path}"
+    if freshness:
+        import json as _json
+        (CACHE_DIR / f"data_freshness_{date_str}.json").write_text(
+            _json.dumps(freshness, ensure_ascii=False, indent=2), encoding="utf-8")
+        _ov = freshness["overall"]
+        _t3 = freshness["top3"]
+        _line = (f"\n\n【数据准确性校验】总评={_ov} | TOP3:{_t3['state']}"
+                 f"(国证{_t3.get('live_date','?')}) | 指数:{freshness['index']['state']}"
+                 f" | 个股:{freshness['basket']['state']}"
+                 f" | 期望最新交易日={freshness['expected_trading_day']}")
+        if _ov != "OK":
+            _line += "\n⚠ " + " | ".join(freshness["messages"])
+        summary += _line
     (CACHE_DIR / "latest_summary.txt").write_text(summary, encoding="utf-8")
     print("\n\n" + summary)
 
