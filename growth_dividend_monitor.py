@@ -2087,12 +2087,24 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         for xg in [x, x_year_end, x_a1, x_a2, x_comb, x_hold, x + width]:
             draw.line([(xg, ty), (xg, ry)], fill=SEP_COLOR, width=1)
 
-    def _draw_holding_periods(draw, x: int, y: int, width: int, periods: list[dict]):
+    def _draw_holding_periods(draw, x: int, y: int, width: int, periods: list[dict],
+                              cyb_prices: dict | None = None):
         """创红方案 持仓周期表: 每个成长期持仓周期一行。
 
-        列: 买入日期 | 卖出日期 | 持有TOP3 | 区间收益 | 持有天数 | 状态
+        列: 买入日期 | 卖出日期 | 持有TOP3 | 区间收益 | 创业板指涨幅 | 持有天数
         红利期=空仓等待(持币, 收益=0); 成长期=满仓持有当期TOP3等权。
         """
+        # 构建创业板指 date→close 映射(用于计算该时段指数涨跌幅对比)
+        if cyb_prices is None:
+            try:
+                import json as _json
+                _cp = CACHE_DIR / "399006.json"
+                if _cp.exists():
+                    _recs = _json.load(open(_cp))["records"]
+                    cyb_prices = {r["date"]: r["close"] for r in _recs}
+            except Exception:
+                cyb_prices = {}
+
         draw.text((x, y), "创红方案 持仓周期表（每次买入 → 卖出）",
                   fill=CAPTION_COLOR, font=font_section)
         sub = ("红利期=空仓等待(持币, 收益=0); 成长期=满仓持有当期TOP3等权。"
@@ -2102,19 +2114,19 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
             draw.text((x, _sy), _sl, fill=SUBTLE_COLOR, font=font_small)
             _sy += 44
 
-        # ── 6 列布局 ──
+        # ── 6 列布局（"状态"→"创业板指涨幅"对比列）──
         w_buy = width * 0.15
         w_sell = width * 0.15
-        w_top3 = width * 0.35
+        w_top3 = width * 0.30       # 略缩给新列腾空间
         w_ret = width * 0.13
-        w_days = width * 0.10
-        w_status = width - (w_buy + w_sell + w_top3 + w_ret + w_days)
+        w_cyb = width * 0.13        # 创业板指涨幅（与区间收益等宽）
+        w_days = width - (w_buy + w_sell + w_top3 + w_ret + w_cyb)  # 天数占余数
         x_buy = x
         x_sell = x + w_buy
         x_top3 = x_sell + w_sell
         x_ret = x_top3 + w_top3
-        x_days = x_ret + w_ret
-        x_status = x_days + w_days
+        x_cyb = x_ret + w_ret
+        x_days = x_cyb + w_cyb
 
         HEADER_ROW_H = 84
         ROW_H = 76
@@ -2128,10 +2140,12 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         draw.text((x_sell + 16, _hx), "卖出日期", fill=CAPTION_COLOR, font=font_small)
         draw.text((x_top3 + 16, _hx), "持有TOP3（等权）", fill=CAPTION_COLOR, font=font_small)
         draw.text((x_ret + 16, _hx), "区间收益", fill=CAPTION_COLOR, font=font_small)
+        draw.text((x_cyb + 16, _hx), "创业板指", fill=CAPTION_COLOR, font=font_small)
         draw.text((x_days + 16, _hx), "持有天数", fill=CAPTION_COLOR, font=font_small)
-        draw.text((x_status + 16, _hx), "状态", fill=CAPTION_COLOR, font=font_small)
 
         ry = ty + HEADER_ROW_H
+        _latest_cyb_date = max(cyb_prices.keys()) if cyb_prices else ""
+
         for i, p in enumerate(periods):
             row_bg = (17, 21, 28) if i % 2 == 0 else (22, 27, 34)
             draw.rectangle([(x, ry), (x + width, ry + ROW_H)], fill=row_bg)
@@ -2152,14 +2166,22 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
             ret = p["ret"]
             _rc = RED_COLOR if ret >= 0 else GREEN_COLOR
             draw.text((x_ret + 16, ry24), f"{ret * 100:+.1f}%", fill=_rc, font=font_small)
+
+            # 创业板指该时段涨跌幅(与策略区间收益做对比)
+            _bp = cyb_prices.get(p["buy"])
+            _sp = cyb_prices.get(p["sell"]) if p["sell"] else cyb_prices.get(_latest_cyb_date)
+            if _bp and _sp and _bp > 0:
+                _cyb_r = (_sp / _bp - 1.0)
+                _crc = RED_COLOR if _cyb_r >= 0 else GREEN_COLOR
+                draw.text((x_cyb + 16, ry24), f"{_cyb_r * 100:+.1f}%", fill=_crc, font=font_small)
+            else:
+                draw.text((x_cyb + 16, ry24), "-", fill=SUBTLE_COLOR, font=font_small)
+
             draw.text((x_days + 16, ry24), f"{p['days']}天", fill=CAPTION_COLOR, font=font_small)
-            _st = p["status"]
-            _sc = BLUE_COLOR if _st == "持有中" else SUBTLE_COLOR
-            draw.text((x_status + 16, ry24), _st, fill=_sc, font=font_small)
             ry += ROW_H
 
         for xg in [x, x_buy + w_buy, x_sell + w_sell, x_top3 + w_top3,
-                   x_ret + w_ret, x_days + w_days, x + width]:
+                   x_ret + w_ret, x_cyb + w_cyb, x + width]:
             draw.line([(xg, ty), (xg, ry)], fill=SEP_COLOR, width=1)
 
     # ── 计算总高度 ──
