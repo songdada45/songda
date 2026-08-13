@@ -39,6 +39,29 @@ DATA_DAYS = 2000        # 约8年交易日(腾讯API上限)，支持长期收益
 ONE_WAY_FEE = 0.001     # 单边交易费率 0.1%
 CACHE_VERSION = 1       # 价格缓存版本锁: 改 MA_WINDOW/MA_BAND/买卖逻辑/DATA_DAYS 时 +1, 自动失效重抓
 
+# 收盘固化阈值: A股15:00收盘(含14:57-15:00集合竞价), 15:10后数据方视为当日终值。
+# 盘中(或收盘竞价未结束)写入的"今日"价一律视为临时值, 下次运行强制重抓,
+# 杜绝盘中测试价被当收盘价固化进缓存 (见 2026-08-13 盘中价误作收盘 bug)。
+MARKET_CLOSE_HHMM = (15, 10)
+
+
+def _cache_finalized_today(saved_at: str | None, today_str: str) -> bool:
+    """缓存中的'今日'数据是否已收盘固化。
+
+    返回 False 的情形: 无时间戳 / 时间戳解析失败 / 时间戳不是今天 /
+    时间戳早于收盘阈值。这些情况下'今日'缓存是盘中临时值, 必须重抓。
+    """
+    if not saved_at:
+        return False
+    try:
+        dt = datetime.fromisoformat(saved_at)
+    except Exception:
+        return False
+    if dt.strftime("%Y-%m-%d") != today_str:
+        return False
+    return (dt.hour, dt.minute) >= MARKET_CLOSE_HHMM
+
+
 CACHE_DIR = Path.cwd() / ".growth_dividend_cache"
 CACHE_DIR.mkdir(exist_ok=True)
 
@@ -67,13 +90,16 @@ BASKET_INDEX = {"code": "399673", "market": "sz"}   # 创业板50 (基准/调仓
 STOCK_CODES = ["300104", "300059", "300070", "300033", "300433", "300136",
                "300015", "300750", "300760", "300274", "300124", "300308", "300502"]
 
-# ─── 关键改造(2026-08-12): 由原「生效日换仓」改为「公告日(发布日)换仓」───
+# ─── TOP3 篮子换仓时间口径 (2026-08-13 按用户要求订正) ───
 # 国证样本股调整方案通常在实施前约2周(约10个交易日)公布 (招募说明书明载:
-# "样本股调整方案通常在实施前两周公布")。本方案于公告日后首交易日开盘换仓,
-# 捕获指数纳入效应(被动资金提前抢跑上涨), 无前视偏差 —— 合规且收益更高。
-#   实测: 基线(生效日)90.29x → 公告日 117.57x(+30.2%), 最大回撤不变(-43.6%)。
-# 因此 SCHEDULE 的键改为「执行日 = 生效日 - ANNOUNCE_GAP 交易日」, 值仍为 TOP3。
-ANNOUNCE_GAP = 10  # 生效日前约10个交易日 ≈ 国证实施前约2周公布窗口
+# "样本股调整方案通常在实施前两周公布")。时间口径严格定义如下:
+#   发布日(公告日) = 生效日 - ANNOUNCE_GAP 交易日 (≈实施前2周)
+#   清单于发布日【收盘后】才公布 → 发布日当天盘中无法得知清单, 不能交易;
+#   执行日 = 发布日 + EXEC_DELAY 交易日 (EXEC_DELAY=1 → 发布日后第一交易日开盘换仓)。
+# 即: 执行日 = 生效日 - ANNOUNCE_GAP + EXEC_DELAY = 生效日 - 9 交易日。
+# 无前视偏差: 仅在清单公布后的下一交易日开盘才买入新篮子。
+ANNOUNCE_GAP = 10   # 生效日前约10个交易日 = 国证「发布日」(权重清单收盘后才公布)
+EXEC_DELAY = 1      # 发布日当天不知清单(盘后才公布), 执行日 = 发布日 + 1 交易日(开盘换仓)
 
 
 def _shift_trading(d: str, n: int) -> str:
@@ -109,11 +135,11 @@ _SCHEDULE_EFFECTIVE = {
     "2026-06-15": ["300750", "300308", "300502"],   # 当前期 (与国证官网 2026-07-31 快照一致)
 }
 
-# 21 期 TOP3; 执行日(公告日后首交易日) → TOP3 ; 驱动 get_bucket_codes / simulate / 回测
-SCHEDULE = {_shift_trading(eff, -ANNOUNCE_GAP): codes
+# 21 期 TOP3; 执行日(发布日+EXEC_DELAY) → TOP3 ; 驱动 get_bucket_codes / simulate / 回测
+SCHEDULE = {_shift_trading(eff, -ANNOUNCE_GAP + EXEC_DELAY): codes
             for eff, codes in _SCHEDULE_EFFECTIVE.items()}
 # 执行日 → 官方生效日 (报告披露用)
-EFFECTIVE_BY_EXEC = {_shift_trading(eff, -ANNOUNCE_GAP): eff
+EFFECTIVE_BY_EXEC = {_shift_trading(eff, -ANNOUNCE_GAP + EXEC_DELAY): eff
                      for eff in _SCHEDULE_EFFECTIVE}
 
 # 个股简称 (报告文字用)
@@ -128,10 +154,10 @@ CNINDEX_TOP3_URL = "https://www.cnindex.com.cn/sample-detail/download-history?in
 
 # ─── 数据获取 (四层容灾) ──────────────────────────────
 
-def fetch_tencent_kline(market: str, code: str, days: int) -> list[dict] | None:
-    """从腾讯财经获取日K线"""
+def fetch_tencent_kline(market: str, code: str, days: int, adj: str = "qfq") -> list[dict] | None:
+    """从腾讯财经获取日K线 (adj: qfq|hfq)。用\"最近days\"格式, 含当日已收盘数据。"""
     url = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
-    params = {"param": f"{market}{code},day,,,{days},qfq"}
+    params = {"param": f"{market}{code},day,,,{days},{adj}"}
     try:
         resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
         resp.raise_for_status()
@@ -199,7 +225,8 @@ def fetch_eastmoney(code: str, days: int) -> list[dict] | None:
         return None
 
 
-def load_cache(index_code: str) -> list[dict] | None:
+def load_cache(index_code: str) -> dict | None:
+    """返回完整缓存 payload {version, records, saved_at?}; 无/失效/不足返回 None。"""
     cache_file = CACHE_DIR / f"{index_code}.json"
     if not cache_file.exists():
         return None
@@ -210,14 +237,15 @@ def load_cache(index_code: str) -> list[dict] | None:
             return None
         records = data.get("records")
         if isinstance(records, list) and len(records) >= 15:
-            return records
+            return data
     except Exception:
         pass
     return None
 
 
 def save_cache(index_code: str, records: list[dict]):
-    payload = {"version": CACHE_VERSION, "records": records}
+    payload = {"version": CACHE_VERSION, "records": records,
+               "saved_at": datetime.now().isoformat(timespec="seconds")}
     (CACHE_DIR / f"{index_code}.json").write_text(
         json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
@@ -268,14 +296,21 @@ def get_index_data(index_info: dict) -> list[dict] | None:
     market = index_info["market"]
     days = DATA_DAYS
 
-    cached = load_cache(code)
-    if cached and len(cached) >= 15:
-        latest_date = max(r["date"] for r in cached)
-        today_str = datetime.now().strftime("%Y-%m-%d")
-        if latest_date >= today_str:
-            # 缓存已含今日数据 → 直接复用, 不必重新抓取
-            return cached
-        print(f"  缓存非今日 ({latest_date})，重新抓取今日数据...")
+    cached_full = load_cache(code)
+    if cached_full:
+        cached = cached_full.get("records", [])
+        if len(cached) >= 15:
+            latest_date = max(r["date"] for r in cached)
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if latest_date >= today_str and _cache_finalized_today(
+                    cached_full.get("saved_at"), today_str):
+                # 缓存含今日且为收盘后固化的终值 → 复用, 不必重新抓取
+                return cached
+            if latest_date >= today_str:
+                print(f"  缓存{today_str}为盘中临时价(保存于{cached_full.get('saved_at')})，"
+                      f"收盘后重新抓取真实收盘...")
+            else:
+                print(f"  缓存非今日 ({latest_date})，重新抓取今日数据...")
 
     sources = [
         ("腾讯财经", lambda: fetch_tencent_kline(market, code, days)),
@@ -339,6 +374,38 @@ def fetch_kline_basket(market, code, start="2014-06-18", end="2026-12-31", adj="
                 recs.append(r)
         cur = nxt
     recs.sort(key=lambda r: r["date"])
+    # 补齐当日(收盘)数据, 防止前向填充出假涨幅:
+    # 腾讯 hfq 的 "最近days" 端点返回空, 故统一用 qfq days 端点拿当日;
+    # 若需 hfq, 则按 "hfq/qfq 比率(非除权日恒定)" 用当日 qfq 涨跌幅推算当日 hfq。
+    # qfq 则直接覆盖最后 20 天。
+    try:
+        qfq_recent = fetch_tencent_kline(market, code, 20, "qfq")
+        if qfq_recent:
+            if adj == "qfq":
+                by = {r["date"]: r for r in recs}
+                for r in qfq_recent:
+                    by[r["date"]] = r
+                recs = sorted(by.values(), key=lambda r: r["date"])
+            else:  # hfq: 用 qfq 当日涨跌幅推算当日 hfq
+                if recs:
+                    last_hfq = recs[-1]
+                    lh_date = last_hfq["date"]
+                    lh_close = float(last_hfq["close"])
+                    qfq_by = {r["date"]: r for r in qfq_recent}
+                    if lh_date in qfq_by:
+                        lq_close = float(qfq_by[lh_date]["close"])
+                        if lq_close:
+                            factor = lh_close / lq_close
+                            for r in qfq_recent:
+                                if r["date"] > lh_date:
+                                    hc = float(r["close"]) * factor
+                                    ho = float(r["open"]) * factor if r.get("open") else hc
+                                    recs.append({"date": r["date"],
+                                                 "open": round(ho, 4),
+                                                 "close": round(hc, 4)})
+                            recs.sort(key=lambda r: r["date"])
+    except Exception as e:
+        print(f"  篮子 {market}{code}({adj}) 当日补齐异常: {e}")
     return recs
 
 
@@ -353,20 +420,32 @@ def load_or_fetch_basket(market, code, adj):
     from datetime import timedelta
     cf = BASKET_CACHE_DIR / f"{market}{code}_{adj}.json"
     cached = None
+    cached_saved_at = None
     if cf.exists():
         try:
             d = json.loads(cf.read_text(encoding="utf-8"))
             if isinstance(d, dict) and d.get("version") == BASKET_CACHE_VERSION and d.get("records"):
                 cached = d["records"]
+                cached_saved_at = d.get("saved_at")
         except Exception:
             pass
     today_str = datetime.now().strftime("%Y-%m-%d")
+
+    def _merge_and_save(merged):
+        cf.write_text(json.dumps(
+            {"version": BASKET_CACHE_VERSION, "records": merged,
+             "saved_at": datetime.now().isoformat(timespec="seconds")},
+            ensure_ascii=False), encoding="utf-8")
+
     if cached:
         latest_date = max(r["date"] for r in cached if r.get("date"))
-        if latest_date >= today_str:
+        if latest_date >= today_str and _cache_finalized_today(cached_saved_at, today_str):
             return cached
-        # 缓存非今日 → 增量补齐缺口
-        print(f"  篮子 {market}{code}({adj}) 缓存非今日({latest_date})，增量补齐至 {today_str}...")
+        if latest_date >= today_str:
+            print(f"  篮子 {market}{code}({adj}) 今日为盘中临时价(保存于{cached_saved_at})，"
+                  f"收盘后重新补齐真实收盘...")
+        else:
+            print(f"  篮子 {market}{code}({adj}) 缓存非今日({latest_date})，增量补齐至 {today_str}...")
         try:
             end_d = (datetime.now() + timedelta(days=400)).strftime("%Y-%m-%d")
             new_recs = fetch_kline_basket(market, code, start=latest_date, end=end_d, adj=adj)
@@ -375,8 +454,7 @@ def load_or_fetch_basket(market, code, adj):
                 for r in new_recs:
                     by[r["date"]] = r
                 merged = sorted(by.values(), key=lambda r: r["date"])
-                cf.write_text(json.dumps({"version": BASKET_CACHE_VERSION, "records": merged},
-                                         ensure_ascii=False), encoding="utf-8")
+                _merge_and_save(merged)
                 return merged
         except Exception as e:
             print(f"  篮子 {market}{code}({adj}) 增量补齐异常({e})，降级用过期缓存")
@@ -384,8 +462,7 @@ def load_or_fetch_basket(market, code, adj):
     # 无缓存 → 全量抓取
     recs = fetch_kline_basket(market, code, adj=adj)
     if recs:
-        cf.write_text(json.dumps({"version": BASKET_CACHE_VERSION, "records": recs},
-                                 ensure_ascii=False), encoding="utf-8")
+        _merge_and_save(recs)
     return recs
 
 
@@ -1267,22 +1344,14 @@ def plot_chart_long(signals: list[dict], result: dict, save_path: str,
             _lo = min(_ny)
             ax2.set_ylim(max(_lo * 0.95, 0.1), max(_ny) * 1.15)
 
-    # 最新信号点 (成长按当前持有段盈亏着色: 盈利紫/未盈利蓝; 红利红)
+    # 最新信号点 (当前位置标记): 成长期=金色, 红利期=红色; 尺寸缩小避免遮挡趋势线
     current_signal = sig_labels[-1]
-    signal_color = "#ff4444"
     if current_signal == "成长":
-        cur_profit = None
-        if profit_map is not None:
-            for k in range(len(sig_labels) - 1, 0, -1):
-                if sig_labels[k] == "成长" and sig_labels[k - 1] != "成长" \
-                        and zones[k] != "缓冲区内(维持)":
-                    d = dates[k].strftime("%Y-%m-%d") if hasattr(dates[k], "strftime") \
-                        else str(dates[k])
-                    cur_profit = profit_map.get(d)
-                    break
-        signal_color = "#a855f7" if cur_profit in (True, None) else "#58a6ff"
-    ax.scatter(dates[-1], ratios[-1], color=signal_color, s=120, zorder=15,
-               edgecolors="white", linewidths=1.5)
+        signal_color = "#FFC832"   # 金色(成长期)
+    else:
+        signal_color = "#ff4444"   # 红色(红利期)
+    ax.scatter(dates[-1], ratios[-1], color=signal_color, s=80, zorder=15,
+               edgecolors="white", linewidths=1.2)
     ax.annotate(f"  {current_signal}期", (dates[-1], ratios[-1]),
                 textcoords="offset points", xytext=(8, 0),
                 fontsize=10, color=signal_color, fontweight="bold", va="center")
@@ -1348,22 +1417,14 @@ def plot_chart_short(signals: list[dict], result: dict, save_path: str,
     _add_signal_markers(ax, dates, ratios, sig_labels, zones, show_labels=True,
                          profit_map=profit_map)
 
-    # 最新信号点 (成长按当前持有段盈亏着色: 盈利紫/未盈利蓝; 红利红)
+    # 最新信号点 (当前位置标记): 成长期=金色, 红利期=红色; 尺寸缩小避免遮挡趋势线
     current_signal = sig_labels[-1]
-    signal_color = "#ff4444"
     if current_signal == "成长":
-        cur_profit = None
-        if profit_map is not None:
-            for k in range(len(sig_labels) - 1, 0, -1):
-                if sig_labels[k] == "成长" and sig_labels[k - 1] != "成长" \
-                        and zones[k] != "缓冲区内(维持)":
-                    d = dates[k].strftime("%Y-%m-%d") if hasattr(dates[k], "strftime") \
-                        else str(dates[k])
-                    cur_profit = profit_map.get(d)
-                    break
-        signal_color = "#a855f7" if cur_profit in (True, None) else "#58a6ff"
-    ax.scatter(dates[-1], ratios[-1], color=signal_color, s=180, zorder=15,
-               edgecolors="white", linewidths=2)
+        signal_color = "#FFC832"   # 金色(成长期)
+    else:
+        signal_color = "#ff4444"   # 红色(红利期)
+    ax.scatter(dates[-1], ratios[-1], color=signal_color, s=100, zorder=15,
+               edgecolors="white", linewidths=1.5)
     ax.annotate(f"<- {current_signal}期 ({result['current_zone']})",
                 (dates[-1], ratios[-1]),
                 textcoords="offset points", xytext=(12, 0),
@@ -1697,8 +1758,8 @@ def get_current_basket_info() -> dict:
     exec_keys = sorted(SCHEDULE.keys())
     cur_exec = max((k for k in exec_keys if k <= tstr), default=exec_keys[0])
     cur_eff = EFFECTIVE_BY_EXEC.get(cur_exec, cur_exec)
-    # 下次执行日 = 下次生效日 - 公告窗口(ANNOUNCE_GAP 交易日)
-    next_exec = _shift_trading(eff.isoformat(), -ANNOUNCE_GAP)
+    # 下次执行日 = 下次生效日 - 公告窗口 + 执行延迟(发布日+1)
+    next_exec = _shift_trading(eff.isoformat(), -ANNOUNCE_GAP + EXEC_DELAY)
     days_left_exec = (date.fromisoformat(next_exec) - today).days
     key_dates = [
         f"本期生效 {cur_eff}（执行日 {cur_exec}）",
