@@ -1450,6 +1450,31 @@ def save_report(result: dict, report_text: str):
 
 # ─── 创红方案计算 (篮子 × 信号) ─────────────────────────
 
+def _extend_index_with_fresh(market: str, code: str, recs: list) -> list:
+    """用 get_index_data(更及时的腾讯端点) 补齐指数 recs 末尾缺失的交易日。
+
+    背景: 盘中 gtimg 的 fqkline 日线常滞后一天(未收盘不更新), 而 get_index_data 用的端点
+    能拿到当日盘中日线。若两者截止日不同, 直接用 gtimg 会导致创红方案回测比趋势信号少一天,
+    出现"顶部写持有TOP3、持仓表却停在旧缺口"的不一致。这里把更及时的最后几天并回 recs。
+    """
+    try:
+        fresh = get_index_data({"code": code, "market": market, "name": code})
+        if not fresh:
+            return recs
+        by = {r["date"]: r for r in recs}
+        last = max(by) if by else ""
+        added = False
+        for r in fresh:
+            if r["date"] > last:
+                by[r["date"]] = r
+                added = True
+        if added:
+            return sorted(by.values(), key=lambda r: r["date"])
+    except Exception:
+        pass
+    return recs
+
+
 def compute_combined_strategy() -> dict | None:
     """创红方案(创业板50 TOP3 篮子 × 红利信号)净值/逐年收益/逐年持仓。
 
@@ -1464,6 +1489,10 @@ def compute_combined_strategy() -> dict | None:
         # 指数长数据: 腾讯 qfq 分块抓 2014-06 起 (不依赖 long_data, 自洽)
         cyb_recs = load_or_fetch_basket("sz", "399006", "qfq")
         div_recs = load_or_fetch_basket("sh", "000922", "qfq")
+        # 与趋势信号同源/同截止日: 用更及时的端点补齐指数末尾交易日
+        # (盘中 gtimg 日线滞后一天会导致创红回测比趋势少一天, 出现顶部/持仓表不一致)
+        cyb_recs = _extend_index_with_fresh("sz", "399006", cyb_recs)
+        div_recs = _extend_index_with_fresh("sh", "000922", div_recs)
         if not cyb_recs or not div_recs:
             print("  [创红方案] 指数数据不足, 跳过")
             return None
@@ -1490,7 +1519,9 @@ def compute_combined_strategy() -> dict | None:
             if not recs:
                 print(f"  [创红方案] 个股 {code} 无数据, 跳过")
                 return None
-            o, c = align_to_master_basket(recs, master_dates, zero_after_last=True)
+            # 非退市个股: 末尾缺失交易日向前填充(避免盘中少一天导致价格=0破坏净值);
+            # 乐视(300104)已退市 → 末日后置0
+            o, c = align_to_master_basket(recs, master_dates, zero_after_last=(code == "300104"))
             stock_open[code] = o
             stock_close[code] = c
 
@@ -2173,6 +2204,8 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     holding_periods = []
     if combined:
         holding_periods = _compute_holding_periods(combined)
+        # 最新买入周期排最前, 方便查看当前持仓与最新收益(与年度表一致: 最新在上)
+        holding_periods.sort(key=lambda p: p["buy"], reverse=True)
         _n = len(holding_periods)
         _w = uniform_w - 2 * BORDER
         _sub_text = ("红利期=空仓等待(持币, 收益=0); 成长期=满仓持有当期TOP3等权。"
@@ -2474,6 +2507,16 @@ def main():
             if p:
                 all_chart_files.append(("逐笔交易收益率（创红方案）", p))
                 print(f"  [逐笔交易图] 已生成: {p}")
+            # 透明化导出: 持仓周期写入 JSON, 供核对"最新收益"是否含当日
+            try:
+                import json as _json
+                (CACHE_DIR / f"holding_periods_{date_str}.json").write_text(
+                    _json.dumps(holding_periods, ensure_ascii=False, indent=2), encoding="utf-8")
+                _latest = max(holding_periods, key=lambda p: p["buy"])
+                print(f"  [持仓核对] 最新周期: 买入 {_latest['buy']} | 卖出 {_latest['sell'] or '持有中'} "
+                      f"| 区间收益 {_latest['ret']*100:+.1f}% | {_latest['status']}")
+            except Exception as _e:
+                print(f"  [持仓核对] 导出失败: {_e}")
         except Exception as e:
             print(f"  [逐笔交易图] 生成失败: {e}")
 
