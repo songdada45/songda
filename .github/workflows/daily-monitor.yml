@@ -2,43 +2,48 @@ name: 每日成长/红利风格轮动监控
 
 on:
   schedule:
-    # 每交易日 15:30 CST = 07:30 UTC (周一至周五)
     - cron: "30 7 * * 1-5"
-  # 允许手动触发
   workflow_dispatch:
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 安装 Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: 安装中文字体 (图表合成用)
+      - name: 安装中文字体
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq fonts-noto-cjk
-
-      - name: 安装 Python 依赖
-        run: pip install -r requirements.txt
-
-      - name: 运行风格轮动监控
+      - run: pip install -r requirements.txt
+      - name: 运行成长/红利风格轮动监控(创业版)
+        continue-on-error: true
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
         run: python growth_dividend_monitor.py
-
-      - name: 存档图表 (可选)
+      - name: 运行科创50/红利风格轮动监控(科创版)
+        continue-on-error: true
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+        run: python kechuang50_monitor.py
+      - name: 存档图表(创业版)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: charts-${{ github.run_id }}
           path: .growth_dividend_cache/chart_all_in_one_*.png
           retention-days: 7
+      - name: 存档图表(科创版)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: charts-kechuang-${{ github.run_id }}
+          path: .kechuang50_cache/chart_all_in_one_*.png
+          retention-days: 7
+
