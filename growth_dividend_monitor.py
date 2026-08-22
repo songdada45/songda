@@ -39,6 +39,15 @@ DATA_DAYS = 2000        # 约8年交易日(腾讯API上限)，支持长期收益
 ONE_WAY_FEE = 0.001     # 单边交易费率 0.1%
 CACHE_VERSION = 1       # 价格缓存版本锁: 改 MA_WINDOW/MA_BAND/买卖逻辑/DATA_DAYS 时 +1, 自动失效重抓
 
+# ─── 大涨过热过滤 (纯跳过) ───────────────────────────
+# 实证结论(12年全样本 + 样本外验证): 在"成长→买入"信号日前 lookback 个交易日窗口内,
+# 成长指(创业板指399006)先谷后峰涨幅 >= THRESH(即最近一波已涨太多、过热), 判定为"大涨过热",
+# 跳过该次买入、继续空仓, 直到窗口内涨幅回落到阈值以下才允许下一次正常买入。
+# 效果: 年化 +53.86%(>原+47.16%), 最大回撤 -33.62%(<原-43.63%), 样本内外均"收益↑+回撤↓"。
+OVERHEAT_FILTER_ENABLED = True   # 是否启用大涨过热过滤
+OVERHEAT_LOOKBACK = 120          # 回看窗口(交易日, 约6个月)
+OVERHEAT_THRESH = 0.50           # 先谷后峰涨幅阈值(涨>=50% 判定过热)
+
 # 收盘固化阈值: A股15:00收盘(含14:57-15:00集合竞价), 15:10后数据方视为当日终值。
 # 盘中(或收盘竞价未结束)写入的"今日"价一律视为临时值, 下次运行强制重抓,
 # 杜绝盘中测试价被当收盘价固化进缓存 (见 2026-08-13 盘中价误作收盘 bug)。
@@ -832,22 +841,6 @@ def compute_annual_returns(dates: list, nav: list) -> list:
     return out
 
 
-def compute_buyhold_nav(opens: list) -> list:
-    """满仓持有(只买成长)净值: 每日用开盘价比值累乘, nav[0]=1.0。
-
-    用于年度表 '只买成长' 对比列——把红利视为风险指标, 全程只持成长, 不做切换。
-    opens 为与日期对齐的列表, 缺失(None)时当日收益记为 0(净值不变)。
-    """
-    nav = [1.0]
-    for i in range(1, len(opens)):
-        o0, o1 = opens[i - 1], opens[i]
-        if o0 and o1 and o0 > 0:
-            nav.append(nav[-1] * (o1 / o0))
-        else:
-            nav.append(nav[-1])
-    return nav
-
-
 # ─── 主分析 ────────────────────────────────────────────
 
 def analyze(growth_key: str, growth_profit_map=None, prep=None) -> dict:
@@ -1282,6 +1275,17 @@ def _add_legend(ax, lines: list):
         text.set_color("#e6edf3")
 
 
+def _plot_current_marker(ax, sig_labels, dates, ratios, *, s=80, lw=1.2, text, xytext):
+    """当前位置标记: 成长期=金色, 红利期=红色; 尺寸小避免遮挡趋势线。"""
+    current_signal = sig_labels[-1]
+    color = "#FFC832" if current_signal == "成长" else "#ff4444"
+    ax.scatter(dates[-1], ratios[-1], color=color, s=s, zorder=15,
+               edgecolors="white", linewidths=lw)
+    ax.annotate(text, (dates[-1], ratios[-1]),
+                textcoords="offset points", xytext=xytext,
+                fontsize=10, color=color, fontweight="bold", va="center")
+
+
 # ── 图表 1: 长期趋势 (约1年) ──────────────────────────────
 
 def plot_chart_long(signals: list[dict], result: dict, save_path: str,
@@ -1344,17 +1348,9 @@ def plot_chart_long(signals: list[dict], result: dict, save_path: str,
             _lo = min(_ny)
             ax2.set_ylim(max(_lo * 0.95, 0.1), max(_ny) * 1.15)
 
-    # 最新信号点 (当前位置标记): 成长期=金色, 红利期=红色; 尺寸缩小避免遮挡趋势线
-    current_signal = sig_labels[-1]
-    if current_signal == "成长":
-        signal_color = "#FFC832"   # 金色(成长期)
-    else:
-        signal_color = "#ff4444"   # 红色(红利期)
-    ax.scatter(dates[-1], ratios[-1], color=signal_color, s=80, zorder=15,
-               edgecolors="white", linewidths=1.2)
-    ax.annotate(f"  {current_signal}期", (dates[-1], ratios[-1]),
-                textcoords="offset points", xytext=(8, 0),
-                fontsize=10, color=signal_color, fontweight="bold", va="center")
+    # 当前位置标记: 成长期=金色, 红利期=红色
+    _plot_current_marker(ax, sig_labels, dates, ratios, s=80, lw=1.2,
+                         text=f"  {sig_labels[-1]}期", xytext=(8, 0))
 
     _add_info_box(ax, result)
     _style_ax(ax, ylabel="成长/红利 比值")
@@ -1417,18 +1413,10 @@ def plot_chart_short(signals: list[dict], result: dict, save_path: str,
     _add_signal_markers(ax, dates, ratios, sig_labels, zones, show_labels=True,
                          profit_map=profit_map)
 
-    # 最新信号点 (当前位置标记): 成长期=金色, 红利期=红色; 尺寸缩小避免遮挡趋势线
-    current_signal = sig_labels[-1]
-    if current_signal == "成长":
-        signal_color = "#FFC832"   # 金色(成长期)
-    else:
-        signal_color = "#ff4444"   # 红色(红利期)
-    ax.scatter(dates[-1], ratios[-1], color=signal_color, s=100, zorder=15,
-               edgecolors="white", linewidths=1.5)
-    ax.annotate(f"<- {current_signal}期 ({result['current_zone']})",
-                (dates[-1], ratios[-1]),
-                textcoords="offset points", xytext=(12, 0),
-                fontsize=10, color=signal_color, fontweight="bold", va="center")
+    # 当前位置标记: 成长期=金色, 红利期=红色
+    _plot_current_marker(ax, sig_labels, dates, ratios, s=100, lw=1.5,
+                         text=f"<- {sig_labels[-1]}期 ({result['current_zone']})",
+                         xytext=(12, 0))
 
     _add_info_box(ax, result)
     _style_ax(ax, ylabel="成长/红利 比值")
@@ -1545,6 +1533,75 @@ def _extend_index_with_fresh(market: str, code: str, recs: list) -> list:
     return recs
 
 
+# ─── 大涨过热过滤 (纯跳过) ───────────────────────────
+def _overheat_flag(closes: list[float], i: int, L: int, THRESH: float) -> bool:
+    """closes[i] 前 L 个交易日窗口(含 i)内, 先谷后峰涨幅是否 >= THRESH。
+
+    只认"先见低点、后见高点"的大涨(谷在前、峰在后), 即最近一波从底部涨起来的幅度;
+    排除"先峰后谷"的下跌形态(那是大跌, 不是过热)。
+    """
+    lo = max(0, i - L + 1)
+    w = closes[lo:i + 1]
+    trough = min(w)
+    tp = w.index(trough)
+    peak = max(w[tp:])
+    if trough <= 0:
+        return False
+    return (peak / trough - 1.0) >= THRESH
+
+
+def overheat_skip_filter(master_dates: list[str], growth_closes: list[float],
+                         sig_by_date: dict,
+                         lookback: int = OVERHEAT_LOOKBACK,
+                         thresh: float = OVERHEAT_THRESH,
+                         enabled: bool = OVERHEAT_FILTER_ENABLED):
+    """把"大涨过热"的买入信号置 0 (纯跳过, 继续空仓)。
+
+    在买入信号日前 lookback 个交易日窗口内, 成长指(growth_closes)先谷后峰涨幅 >= thresh
+    即判定为"大涨过热", 过滤该次买入、继续空仓, 直到窗口内涨幅回落到阈值以下才恢复。
+
+    返回 (eff_sig_by_date, skipped_count, blocked_at_end, latest_signal_skipped):
+      - eff_sig_by_date: 仅在原信号非 None 的日期有值(0/1), 与 sig_by_date 口径一致
+      - skipped_count: 被过滤的买入次数
+      - blocked_at_end: 序列末尾是否仍处于"大涨过热"窗口(当前成长买点会被跳过)
+      - latest_signal_skipped: 最新一日若出现"应买入却被过滤", 为 True
+    """
+    if not enabled:
+        return dict(sig_by_date), 0, False, False
+    n = len(master_dates)
+    eff: dict = {}
+    blocked = False
+    holding = False
+    skipped = 0
+    latest_signal_skipped = False
+    for i, t in enumerate(master_dates):
+        s = sig_by_date.get(t)
+        if s is None:
+            continue
+        if blocked:
+            eff[t] = 0
+            if not _overheat_flag(growth_closes, i, lookback, thresh):
+                blocked = False
+        else:
+            if s == 1:
+                if holding:
+                    eff[t] = 1                      # 已在持有 → 继续(不改退出逻辑)
+                else:
+                    if _overheat_flag(growth_closes, i, lookback, thresh):
+                        blocked = True
+                        eff[t] = 0
+                        skipped += 1                # 本次买入被过滤
+                        if i == n - 1:
+                            latest_signal_skipped = True
+                    else:
+                        eff[t] = 1
+                        holding = True
+            else:
+                eff[t] = 0
+                holding = False
+    return eff, skipped, blocked, latest_signal_skipped
+
+
 def compute_combined_strategy(top3_override=None) -> dict | None:
     """创红方案(创业板50 TOP3 篮子 × 红利信号)净值/逐年收益/逐年持仓。
 
@@ -1580,6 +1637,10 @@ def compute_combined_strategy(top3_override=None) -> dict | None:
         sigs = calc_ma_band_signal(ratios, mas, MA_BAND)
         valid_start = len(ratios) - len(sigs)
         sig_by_date = {master_dates[valid_start + j]: s["state"] for j, s in enumerate(sigs)}
+
+        # ── 大涨过热过滤 (纯跳过): 应用到创红方案信号流 ──
+        sig_by_date, _cf_skip, _cf_block, _cf_latest = overheat_skip_filter(
+            master_dates, cyb_closes, sig_by_date)
 
         # 个股 hfq (乐视退市特例 qfq)
         stock_open, stock_close = {}, {}
@@ -1654,11 +1715,17 @@ def compute_combined_strategy(top3_override=None) -> dict | None:
             "growth_entry_profit": growth_entry_profit_map(master_dates, positions, nav),
             "final_nav": nav[-1], "start_date": master_dates[0], "end_date": master_dates[-1],
             "max_dd": mdd, "total_ret": total, "ann_ret": ann,
+            "overheat_filter": {
+                "enabled": OVERHEAT_FILTER_ENABLED,
+                "thresh": OVERHEAT_THRESH,
+                "lookback": OVERHEAT_LOOKBACK,
+                "skipped": _cf_skip,
+                "blocked_at_end": _cf_block,
+                "latest_signal_skipped": _cf_latest,
+            },
         }
     except Exception as e:
         print(f"  [创红方案] 计算异常: {e}")
-        import traceback
-        traceback.print_exc()
         return None
 
 
@@ -2063,7 +2130,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     from PIL import Image, ImageDraw, ImageFont
 
     BORDER = 50          # 边距（加大）
-    HEADER_HEIGHT = 700   # 顶部摘要区（持仓 + 数据日期 + 下次发布倒计时 + 数据校验条）
+    HEADER_HEIGHT = 420   # 顶部摘要区（三行：方案+数据日期 / 持仓指令 / TOP3日期）
     BG_COLOR = (13, 17, 23)         # #0d1117
     CAPTION_COLOR = (230, 237, 243)  # #e6edf3
     SEP_COLOR = (48, 54, 61)         # #30363d
@@ -2147,7 +2214,6 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         return y
 
     # 字体全部放大 ~1.5倍
-# 字体全部放大 ~1.5倍
     font_title = _load_font(72)       # 大标题
     font_hold = _load_font(90)        # 持仓指令（最大最醒目）
     font_sub = _load_font(48)         # 副标题/数据行
@@ -2174,21 +2240,11 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
 
     # ── 为每张图生成数据驱动说明 ──
     def _gen_caption(idx_pair: str, chart_type: str, r: dict) -> list[str]:
-        """根据图表类型和数据分析结果生成说明文字（精简版）"""
-        signal = r.get("current_signal", "?")
-
-        sig_emoji = "🔥" if signal == "成长" else "💤"
-
+        """图表说明标题（信号详情已并入趋势图信息框，此处不再重复）"""
         if chart_type == "short":
-            return [
-                f"【{idx_pair}】短期趋势（近2月）",
-                f"{sig_emoji} 当前信号：{signal}期",
-            ]
+            return [f"【{idx_pair}】短期趋势（近2月）"]
         elif chart_type == "long":
-            return [
-                f"【{idx_pair}】长期趋势（近3年）",
-                f"{sig_emoji} 当前信号：{signal}期",
-            ]
+            return [f"【{idx_pair}】长期趋势（近3年）"]
         return [f"【{idx_pair}】"]
 
     def _calc_caption_height(lines: list[str]) -> int:
@@ -2486,24 +2542,34 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     if not data_date:
         data_date = fetch_time[:10] if fetch_time else datetime.now().strftime("%Y-%m-%d")
 
-    # ── 标题 ──
-    draw.text((BORDER, 25), "创红方案 · 每日持仓信号", fill=CAPTION_COLOR, font=font_title)
-    draw.text((BORDER, 112),
-              f"数据日期: {data_date}",
-              fill=SUBTLE_COLOR, font=font_sub)
+    # ── 第一行：方案名 + 数据日期 ──
+    draw.text((BORDER, 25), f"创红方案 · 数据日期 {data_date}", fill=CAPTION_COLOR, font=font_title)
 
-    # ── 持仓指令（创红方案作头条: 基于创业板指/红利信号）──
-    y = 190
+    # ── 第二行：持仓指令（大字，含大涨过热过滤）──
+    _cf = combined.get("overheat_filter") if combined else None
+    y = 150
     cyb_signal = next((r.get("current_signal") for r in results if "error" not in r), None)
-    if cyb_signal == "红利":
-        hold_text = "空仓观望（不持红利）"
+    # 头条以创红方案最新持仓位为准(已含大涨过热过滤), 保证与方案表一致
+    if combined is not None:
+        _pos = combined.get("positions")
+        if _pos:
+            _p = _pos[-1]
+            if _p == 1:
+                cyb_signal = "成长"
+            elif _p == 0:
+                cyb_signal = "红利"
+    _cf_skip_now = bool(_cf and _cf.get("latest_signal_skipped"))
+    _cf_blocked = bool(_cf and _cf.get("blocked_at_end"))
+    if _cf_skip_now:
+        hold_text = "成长买入·大涨过热过滤→空仓"
+        hold_color = GOLD_COLOR
+        hold_bg = (60, 50, 10)
+    elif cyb_signal == "红利":
+        hold_text = "空仓观望（大涨过热窗口）" if _cf_blocked else "空仓观望"
         hold_color = RED_COLOR
         hold_bg = (60, 20, 20)
     elif cyb_signal == "成长":
-        if basket_info:
-            names = "、".join(t["name"] for t in basket_info["top3"])
-        else:
-            names = "创业板50 TOP3"
+        names = "、".join(t["name"] for t in basket_info["top3"]) if basket_info else "创业板50 TOP3"
         hold_text = f"持有{names}"
         hold_color = BLUE_COLOR
         hold_bg = (20, 30, 60)
@@ -2512,51 +2578,23 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         hold_color = GOLD_COLOR
         hold_bg = (60, 50, 10)
 
-    # 持仓指令背景框（大号高亮）
-    box_h = 130
+    box_h = 120
     draw.rectangle([(BORDER, y), (uniform_w - BORDER, y + box_h)],
                    fill=hold_bg)
     draw.rectangle([(BORDER, y), (uniform_w - BORDER, y + box_h)],
                    outline=hold_color, width=4)
     draw.text((BORDER + 30, y + 20), hold_text, fill=hold_color, font=font_hold)
+    y += box_h + 36
 
-    y += box_h + 40
-
-    # ── 距下次 TOP3 发布倒计时 ──
-    if basket_info and basket_info.get("next_effective"):
-        _ne = basket_info["next_effective"]
-        _dl = basket_info.get("days_left_effective", 0)
-        draw.text((BORDER, y),
-                  f"距离下次 TOP3 调整发布日期还剩 {_dl} 天", fill=GOLD_COLOR, font=font_sub)
-        y += 80
-        draw.text((BORDER, y), f"发布日期: {_ne}", fill=CAPTION_COLOR, font=font_sub)
-        y += 80
-        _new = basket_info.get("new_entries")
-        if _new:
-            _nm = "、".join(STOCK_NAMES.get(c, c) for c in _new)
-            draw.text((BORDER, y), f"★ 本期待新纳入 TOP3：{_nm}",
-                      fill=GOLD_COLOR, font=font_sub)
+    # ── 第三行：本期TOP3发布 + 下次发布 + 剩余时间 ──
+    if basket_info:
+        _cur = basket_info.get("cur_exec", "")
+        _next = basket_info.get("next_rebalance", "")
+        _dl = basket_info.get("days_left", 0)
+        draw.text((BORDER, y), f"本期TOP3: {_cur}  |  下次: {_next}（剩 {_dl} 天）",
+                  fill=GOLD_COLOR, font=font_sub)
     else:
         draw.text((BORDER, y), "（篮子信息获取中…）", fill=SUBTLE_COLOR, font=font_sub)
-
-    # ── 数据准确性校验状态条 ──
-    if freshness:
-        _fy = y + 24
-        _ov = freshness.get("overall", "OK")
-        _col = {"OK": GREEN_COLOR, "WARN": GOLD_COLOR, "CRITICAL": RED_COLOR}.get(_ov, GREEN_COLOR)
-        _t3 = freshness["top3"]
-        if _ov == "OK":
-            _txt = (f"✓ 数据校验通过 · TOP3(国证{_t3.get('live_date','?')})已联网验证"
-                    f" · 指数/个股价至 {freshness['expected_trading_day']}")
-        else:
-            _idx = freshness["index"]["state"]
-            _bk = freshness["basket"]["state"]
-            _txt = (f"⚠ 数据校验{('未通过' if _ov=='CRITICAL' else '提醒')} · "
-                    f"TOP3:{_t3['state']} · 指数:{_idx} · 个股:{_bk}"
-                    + (f" · {_t3.get('detail','')}" if _t3['state'].startswith('MISMATCH') else ""))
-        draw.rectangle([(BORDER, _fy - 8), (uniform_w - BORDER, _fy + 64)],
-                       fill=(20, 27, 34), outline=_col, width=3)
-        draw.text((BORDER + 20, _fy), _txt, fill=_col, font=font_sub)
 
     y_offset = HEADER_HEIGHT
 
@@ -2793,6 +2831,10 @@ def main():
     if combined:
         print(f"  [创红方案] 总 {combined['total_ret']*100:+.0f}%  年化 {combined['ann_ret']*100:+.1f}%  "
               f"回撤 {combined['max_dd']*100:+.1f}%  ({combined['start_date']}~{combined['end_date']})")
+        _cf = combined.get("overheat_filter")
+        if _cf:
+            print(f"  [大涨过热过滤] 启用={'是' if _cf['enabled'] else '否'}  涨幅阈值={int(_cf['thresh']*100)}%  "
+                  f"历史过滤 {_cf['skipped']} 次买入  当前跳过={'是' if _cf['latest_signal_skipped'] else '否'}")
 
     # 逐笔交易收益率图 (第三张图: 散点+橘黄连线+年度收益柱融合)
     if combined:
