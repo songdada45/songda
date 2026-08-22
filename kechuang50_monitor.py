@@ -39,6 +39,15 @@ DATA_DAYS = 2000        # 约8年交易日(腾讯API上限)，支持长期收益
 ONE_WAY_FEE = 0.001     # 单边交易费率 0.1%
 CACHE_VERSION = 1       # 价格缓存版本锁: 改 MA_WINDOW/MA_BAND/买卖逻辑/DATA_DAYS 时 +1, 自动失效重抓
 
+# ─── 大涨过热过滤 (纯跳过) ───────────────────────────
+# 实证结论(全样本 + 样本外验证): 在"成长→买入"信号日前 lookback 个交易日窗口内,
+# 成长指(科创50 000688)先谷后峰涨幅 >= THRESH(即最近一波已涨太多、过热), 判定为"大涨过热",
+# 跳过该次买入、继续空仓, 直到窗口内涨幅回落到阈值以下才允许下一次正常买入。
+# 效果: 年化提升、最大回撤下降, 样本内外均"收益↑+回撤↓"。
+OVERHEAT_FILTER_ENABLED = True   # 是否启用大涨过热过滤
+OVERHEAT_LOOKBACK = 120          # 回看窗口(交易日, 约6个月)
+OVERHEAT_THRESH = 0.50           # 先谷后峰涨幅阈值(涨>=50% 判定过热)
+
 # 收盘固化阈值: A股15:00收盘(含14:57-15:00集合竞价), 15:10后数据方视为当日终值。
 # 盘中(或收盘竞价未结束)写入的"今日"价一律视为临时值, 下次运行强制重抓,
 # 杜绝盘中测试价被当收盘价固化进缓存 (见 2026-08-13 盘中价误作收盘 bug)。
@@ -79,7 +88,7 @@ HEADERS = {
 EASTMONEY_SECID = {"000688": "1.000688", "000922": "1.000922"}
 
 # ─── 篮子策略配置 (科创50 TOP3 × 红利信号轮动) ─────────
-# 科创方案: 用「科创50/红利 缓冲均线信号」作总开关, 成长期开盘买入当期
+# 科红方案: 用「科创50/红利 缓冲均线信号」作总开关, 成长期开盘买入当期
 # 科创50 前3权重等权篮子(1/3), 红利期空仓; 半年官方生效日调仓.
 BASKET_CACHE_DIR = CACHE_DIR / "basket_cache"
 BASKET_CACHE_DIR.mkdir(exist_ok=True)
@@ -523,9 +532,9 @@ def align_to_master_basket(recs, master_dates, zero_after_last=True):
 def simulate_enhanced(master_dates, sig_by_date, stock_open, stock_close,
                       div_open, div_close, div_on, schedule=SCHEDULE,
                       top3_override=None):
-    """科创方案净值模拟: 开盘价执行, T-1收盘信号→T开盘; 含 ONE_WAY_FEE; 退市→末日后0。
+    """科红方案净值模拟: 开盘价执行, T-1收盘信号→T开盘; 含 ONE_WAY_FEE; 退市→末日后0。
 
-    - div_on=False: 红利期空仓(=1.0)  ← 科创方案采用此口径
+    - div_on=False: 红利期空仓(=1.0)  ← 科红方案采用此口径
     - div_on=True:  红利期持有中证红利
     返回值 (nav, positions), 长度=len(master_dates)。
     """
@@ -1006,7 +1015,7 @@ def format_brief(result: dict, basket_info: dict | None = None) -> str:
     diff_pct = result["ratio_ma_diff_pct"]
 
     lines = [
-        f"{emoji} 科创方案每日监控 {result['index_pair']}",
+        f"{emoji} 科红方案每日监控 {result['index_pair']}",
         f"信号: {signal}期",
         f"区域: {result['current_zone']}",
         f"比值: {result['current_ratio']:.4f} | 均线: {result['current_ma']:.4f}",
@@ -1022,7 +1031,7 @@ def format_brief(result: dict, basket_info: dict | None = None) -> str:
     if result.get("chart_paths"):
         lines.append(f"📊 图表: {len(result['chart_paths'])} 张 (长期/短期)")
 
-    # 科创方案篮子信息 (资讯联动)
+    # 科红方案篮子信息 (资讯联动)
     if basket_info:
         top3 = basket_info["top3"]
         names = "、".join(t["name"] for t in top3)
@@ -1499,13 +1508,13 @@ def save_report(result: dict, report_text: str):
     (CACHE_DIR / f"report_{date_str}.txt").write_text(report_text, encoding="utf-8")
 
 
-# ─── 科创方案计算 (篮子 × 信号) ─────────────────────────
+# ─── 科红方案计算 (篮子 × 信号) ─────────────────────────
 
 def _extend_index_with_fresh(market: str, code: str, recs: list) -> list:
     """用 get_index_data(更及时的腾讯端点) 补齐指数 recs 末尾缺失的交易日。
 
     背景: 盘中 gtimg 的 fqkline 日线常滞后一天(未收盘不更新), 而 get_index_data 用的端点
-    能拿到当日盘中日线。若两者截止日不同, 直接用 gtimg 会导致科创方案回测比趋势信号少一天,
+    能拿到当日盘中日线。若两者截止日不同, 直接用 gtimg 会导致科红方案回测比趋势信号少一天,
     出现"顶部写持有TOP3、持仓表却停在旧缺口"的不一致。这里把更及时的最后几天并回 recs。
     """
     try:
@@ -1526,8 +1535,77 @@ def _extend_index_with_fresh(market: str, code: str, recs: list) -> list:
     return recs
 
 
+# ─── 大涨过热过滤 (纯跳过) ───────────────────────────
+def _overheat_flag(closes: list[float], i: int, L: int, THRESH: float) -> bool:
+    """closes[i] 前 L 个交易日窗口(含 i)内, 先谷后峰涨幅是否 >= THRESH。
+
+    只认"先见低点、后见高点"的大涨(谷在前、峰在后), 即最近一波从底部涨起来的幅度;
+    排除"先峰后谷"的下跌形态(那是大跌, 不是过热)。
+    """
+    lo = max(0, i - L + 1)
+    w = closes[lo:i + 1]
+    trough = min(w)
+    tp = w.index(trough)
+    peak = max(w[tp:])
+    if trough <= 0:
+        return False
+    return (peak / trough - 1.0) >= THRESH
+
+
+def overheat_skip_filter(master_dates: list[str], growth_closes: list[float],
+                         sig_by_date: dict,
+                         lookback: int = OVERHEAT_LOOKBACK,
+                         thresh: float = OVERHEAT_THRESH,
+                         enabled: bool = OVERHEAT_FILTER_ENABLED):
+    """把"大涨过热"的买入信号置 0 (纯跳过, 继续空仓)。
+
+    在买入信号日前 lookback 个交易日窗口内, 成长指(growth_closes)先谷后峰涨幅 >= thresh
+    即判定为"大涨过热", 过滤该次买入、继续空仓, 直到窗口内涨幅回落到阈值以下才恢复。
+
+    返回 (eff_sig_by_date, skipped_count, blocked_at_end, latest_signal_skipped):
+      - eff_sig_by_date: 仅在原信号非 None 的日期有值(0/1), 与 sig_by_date 口径一致
+      - skipped_count: 被过滤的买入次数
+      - blocked_at_end: 序列末尾是否仍处于"大涨过热"窗口(当前成长买点会被跳过)
+      - latest_signal_skipped: 最新一日若出现"应买入却被过滤", 为 True
+    """
+    if not enabled:
+        return dict(sig_by_date), 0, False, False
+    n = len(master_dates)
+    eff: dict = {}
+    blocked = False
+    holding = False
+    skipped = 0
+    latest_signal_skipped = False
+    for i, t in enumerate(master_dates):
+        s = sig_by_date.get(t)
+        if s is None:
+            continue
+        if blocked:
+            eff[t] = 0
+            if not _overheat_flag(growth_closes, i, lookback, thresh):
+                blocked = False
+        else:
+            if s == 1:
+                if holding:
+                    eff[t] = 1                      # 已在持有 → 继续(不改退出逻辑)
+                else:
+                    if _overheat_flag(growth_closes, i, lookback, thresh):
+                        blocked = True
+                        eff[t] = 0
+                        skipped += 1                # 本次买入被过滤
+                        if i == n - 1:
+                            latest_signal_skipped = True
+                    else:
+                        eff[t] = 1
+                        holding = True
+            else:
+                eff[t] = 0
+                holding = False
+    return eff, skipped, blocked, latest_signal_skipped
+
+
 def compute_combined_strategy(top3_override=None) -> dict | None:
-    """科创方案(科创50 TOP3 篮子 × 红利信号)净值/逐年收益/逐年持仓。
+    """科红方案(科创50 TOP3 篮子 × 红利信号)净值/逐年收益/逐年持仓。
 
     信号源: 科创50(000688) vs 中证红利(000922) 缓冲均线 (与线上 24.06x 基线同口径)。
     资产: 成长期持当期科创50 TOP3 等权, 红利期空仓 (regime B)。
@@ -1541,17 +1619,17 @@ def compute_combined_strategy(top3_override=None) -> dict | None:
         cyb_recs = load_or_fetch_basket("sh", "000688", "qfq")
         div_recs = load_or_fetch_basket("sh", "000922", "qfq")
         # 与趋势信号同源/同截止日: 用更及时的端点补齐指数末尾交易日
-        # (盘中 gtimg 日线滞后一天会导致科创方案回测比趋势少一天, 出现顶部/持仓表不一致)
+        # (盘中 gtimg 日线滞后一天会导致科红方案回测比趋势少一天, 出现顶部/持仓表不一致)
         cyb_recs = _extend_index_with_fresh("sh", "000688", cyb_recs)
         div_recs = _extend_index_with_fresh("sh", "000922", div_recs)
         if not cyb_recs or not div_recs:
-            print("  [科创方案] 指数数据不足, 跳过")
+            print("  [科红方案] 指数数据不足, 跳过")
             return None
         cyb_map = {r["date"]: r["close"] for r in cyb_recs}
         div_map = {r["date"]: r["close"] for r in div_recs}
         master_dates = sorted(set(cyb_map) & set(div_map))
         if len(master_dates) < MA_WINDOW + 2:
-            print(f"  [科创方案] 共同交易日不足 ({len(master_dates)})")
+            print(f"  [科红方案] 共同交易日不足 ({len(master_dates)})")
             return None
 
         cyb_closes = [cyb_map[d] for d in master_dates]
@@ -1562,13 +1640,17 @@ def compute_combined_strategy(top3_override=None) -> dict | None:
         valid_start = len(ratios) - len(sigs)
         sig_by_date = {master_dates[valid_start + j]: s["state"] for j, s in enumerate(sigs)}
 
+        # ── 大涨过热过滤 (纯跳过): 应用到科红方案信号流 ──
+        sig_by_date, _cf_skip, _cf_block, _cf_latest = overheat_skip_filter(
+            master_dates, cyb_closes, sig_by_date)
+
         # 个股 hfq (乐视退市特例 qfq)
         stock_open, stock_close = {}, {}
         for code in STOCK_CODES:
             adj = "qfq" if code in DELISTED_BASKET else "hfq"
             recs = load_or_fetch_basket("sh", code, adj)
             if not recs:
-                print(f"  [科创方案] 个股 {code} 无数据, 跳过")
+                print(f"  [科红方案] 个股 {code} 无数据, 跳过")
                 return None
             # 非退市个股: 末尾缺失交易日向前填充(避免盘中少一天导致价格=0破坏净值);
             # 退市股(DELISTED_BASKET) → 末日后置0
@@ -1635,9 +1717,17 @@ def compute_combined_strategy(top3_override=None) -> dict | None:
             "growth_entry_profit": growth_entry_profit_map(master_dates, positions, nav),
             "final_nav": nav[-1], "start_date": master_dates[0], "end_date": master_dates[-1],
             "max_dd": mdd, "total_ret": total, "ann_ret": ann,
+            "overheat_filter": {
+                "enabled": OVERHEAT_FILTER_ENABLED,
+                "thresh": OVERHEAT_THRESH,
+                "lookback": OVERHEAT_LOOKBACK,
+                "skipped": _cf_skip,
+                "blocked_at_end": _cf_block,
+                "latest_signal_skipped": _cf_latest,
+            },
         }
     except Exception as e:
-        print(f"  [科创方案] 计算异常: {e}")
+        print(f"  [科红方案] 计算异常: {e}")
         return None
 
 
@@ -1886,7 +1976,7 @@ def verify_data_freshness(basket_info: dict | None = None) -> dict:
 # ─── 合成图: 所有图表纵向拼接为一张大图 ─────────────────
 
 def _compute_holding_periods(combined: dict, top3_override=None) -> list[dict]:
-    """从科创方案 NAV/仓位 提取每个成长期持仓周期。
+    """从科红方案 NAV/仓位 提取每个成长期持仓周期。
 
     返回每行: {buy, sell, top3, ret, days, status}
       - buy:  成长期首日出 (信号次日开盘买入)
@@ -1992,7 +2082,7 @@ def plot_trade_returns(holding_periods: list[dict], save_path: str,
     n_win = sum(1 for y in ys if y >= 0)
     n_loss = len(ys) - n_win
 
-    ax.set_title("逐笔交易收益率（科创方案 · 已平仓交易）",
+    ax.set_title("逐笔交易收益率（科红方案 · 已平仓交易）",
                  color="#e6edf3", fontsize=18, fontweight="bold", pad=14)
     ax.set_xlabel("买入执行日", color="#8b949e", fontsize=13)
     ax.set_ylabel("该笔区间收益率 (%)", color="#8b949e", fontsize=13)
@@ -2030,13 +2120,13 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     """将多张图表纵向拼接为一张大图，每张图前加详细数据说明，顶部加摘要
 
     针对手机端阅读优化：使用大字号、每张图前提供数据驱动的多行描述
-    科创方案(科创50 TOP3 篮子 × 红利信号)作头条: 顶部持仓指令 + 篮子信息块,
-    底部年度表扩为 5 列(追加 科创方案收益 / 科创方案持仓)。
+    科红方案(科创50 TOP3 篮子 × 红利信号)作头条: 顶部持仓指令 + 篮子信息块,
+    底部年度表扩为 5 列(追加 科红方案收益 / 科红方案持仓)。
     """
     from PIL import Image, ImageDraw, ImageFont
 
     BORDER = 50          # 边距（加大）
-    HEADER_HEIGHT = 700   # 顶部摘要区（持仓 + 数据日期 + 下次发布倒计时 + 数据校验条）
+    HEADER_HEIGHT = 420   # 顶部摘要区（三行：方案+数据日期 / 持仓指令 / TOP3日期）
     BG_COLOR = (13, 17, 23)         # #0d1117
     CAPTION_COLOR = (230, 237, 243)  # #e6edf3
     SEP_COLOR = (48, 54, 61)         # #30363d
@@ -2146,21 +2236,11 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
 
     # ── 为每张图生成数据驱动说明 ──
     def _gen_caption(idx_pair: str, chart_type: str, r: dict) -> list[str]:
-        """根据图表类型和数据分析结果生成说明文字（精简版）"""
-        signal = r.get("current_signal", "?")
-
-        sig_emoji = "🔥" if signal == "成长" else "💤"
-
+        """图表说明标题（信号详情已并入趋势图信息框，此处不再重复）"""
         if chart_type == "short":
-            return [
-                f"【{idx_pair}】短期趋势（近2月）",
-                f"{sig_emoji} 当前信号：{signal}期",
-            ]
+            return [f"【{idx_pair}】短期趋势（近2月）"]
         elif chart_type == "long":
-            return [
-                f"【{idx_pair}】长期趋势（近3年）",
-                f"{sig_emoji} 当前信号：{signal}期",
-            ]
+            return [f"【{idx_pair}】长期趋势（近3年）"]
         return [f"【{idx_pair}】"]
 
     def _calc_caption_height(lines: list[str]) -> int:
@@ -2172,14 +2252,14 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                            annual_returns: dict, data_date: str):
         """在画布底部绘制逐年涨幅表 (5 列)。
 
-        列: 年份 | 科创轮动 | 科创只成长 | 科创方案收益 | 科创方案持仓
+        列: 年份 | 科创轮动 | 科创只成长 | 科红方案收益 | 科红方案持仓
           - 轮动 = 本策略(红利视为风险指标, 跌破下轨切红利)
           - 只成长 = 成长期持有成长、红利期空仓(=1.0), 即策略的"成长贡献"分量
-          - 科创方案 = 科创50 TOP3 篮子 × 红利信号 (成长→持TOP3, 红利→空仓), 2014-06 起
+          - 科红方案 = 科创50 TOP3 篮子 × 红利信号 (成长→持TOP3, 红利→空仓), 2014-06 起
         涨(>=0)=红, 跌(<0)=绿(中国惯例)。缺失年份显示 —。最新年份标 * 表示年内至今。
         """
         # ── 标题 ──
-        draw.text((x, y), "逐年涨幅：轮动对比 + 科创方案", fill=CAPTION_COLOR, font=font_section)
+        draw.text((x, y), "逐年涨幅：轮动对比 + 科红方案", fill=CAPTION_COLOR, font=font_section)
         sub = (f"按自然年 · 涨红跌绿 · 末行*为年内至今(截至 {data_date}) · "
                f"空仓=红利期主动持币(收益=0, 非缺数据)")
         _sub_lines = wrap_text(sub, font_small, width - 8)
@@ -2191,8 +2271,8 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         # ── 列布局 (5 列) ──
         w_year = width * 0.11
         w_a = width * 0.21       # 2 个对比列等宽
-        w_comb = width * 0.13    # 科创方案收益列
-        w_hold = width - (w_year + 2 * w_a + w_comb)  # 科创方案持仓列 (占满余数)
+        w_comb = width * 0.13    # 科红方案收益列
+        w_hold = width - (w_year + 2 * w_a + w_comb)  # 科红方案持仓列 (占满余数)
         x_year_end = x + w_year
         x_a1 = x_year_end
         x_a2 = x_a1 + w_a
@@ -2227,8 +2307,8 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         draw.text((x + 20, ty + 24), "年份", fill=CAPTION_COLOR, font=font_small)
         draw.text((x_a1 + 18, ty + 24), f"科创轮动 {cyb_term:.2f}x", fill=RED_COLOR, font=font_small)
         draw.text((x_a2 + 18, ty + 24), f"科创只成长 {cyb_go_term:.2f}x", fill=BLUE_COLOR, font=font_small)
-        draw.text((x_comb + 16, ty + 24), f"科创方案 {comb_term:.2f}x", fill=GOLD_COLOR, font=font_small)
-        draw.text((x_hold + 16, ty + 24), "科创方案持仓", fill=GOLD_COLOR, font=font_small)
+        draw.text((x_comb + 16, ty + 24), f"科红方案 {comb_term:.2f}x", fill=GOLD_COLOR, font=font_small)
+        draw.text((x_hold + 16, ty + 24), "科红方案持仓", fill=GOLD_COLOR, font=font_small)
 
         # ── 数据行 ──
         ry = ty + HEADER_ROW_H
@@ -2245,14 +2325,14 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
                     draw.text((xc + 18, ry + 24), f"{ret * 100:+.1f}%", fill=col, font=font_small)
                 else:
                     draw.text((xc + 18, ry + 24), "—", fill=SUBTLE_COLOR, font=font_small)
-            # 科创方案收益
+            # 科红方案收益
             if yr in comb_map:
                 ret = comb_map[yr]
                 col = RED_COLOR if ret >= 0 else GREEN_COLOR
                 draw.text((x_comb + 16, ry + 24), f"{ret * 100:+.1f}%", fill=col, font=font_small)
             else:
                 draw.text((x_comb + 16, ry + 24), "—", fill=SUBTLE_COLOR, font=font_small)
-            # 科创方案持仓 (列宽不足时自动缩字号, 避免文字截断)
+            # 科红方案持仓 (列宽不足时自动缩字号, 避免文字截断)
             if yr in comb_hold:
                 _htxt = comb_hold[yr]
                 _hf = font_small
@@ -2273,7 +2353,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
 
     def _draw_holding_periods(draw, x: int, y: int, width: int, periods: list[dict],
                               cyb_prices: dict | None = None):
-        """科创方案 持仓周期表: 每个成长期持仓周期一行。
+        """科红方案 持仓周期表: 每个成长期持仓周期一行。
 
         列: 买入日期 | 卖出日期 | 持有TOP3 | 区间收益 | 科创50涨幅 | 持有天数
         红利期=空仓等待(持币, 收益=0); 成长期=满仓持有当期TOP3等权。
@@ -2289,7 +2369,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
             except Exception:
                 cyb_prices = {}
 
-        draw.text((x, y), "科创方案 持仓周期表（每次买入 → 卖出）",
+        draw.text((x, y), "科红方案 持仓周期表（每次买入 → 卖出）",
                   fill=CAPTION_COLOR, font=font_section)
         sub = ("红利期=空仓等待(持币, 收益=0); 成长期=满仓持有当期TOP3等权。"
                "买入/卖出日期均为信号次日开盘执行。"
@@ -2458,24 +2538,34 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     if not data_date:
         data_date = fetch_time[:10] if fetch_time else datetime.now().strftime("%Y-%m-%d")
 
-    # ── 标题 ──
-    draw.text((BORDER, 25), "科创方案 · 每日持仓信号", fill=CAPTION_COLOR, font=font_title)
-    draw.text((BORDER, 112),
-              f"数据日期: {data_date}",
-              fill=SUBTLE_COLOR, font=font_sub)
+    # ── 第一行：方案名 + 数据日期 ──
+    draw.text((BORDER, 25), f"科红方案 · 数据日期 {data_date}", fill=CAPTION_COLOR, font=font_title)
 
-    # ── 持仓指令（科创方案作头条: 基于科创50/红利信号）──
-    y = 190
+    # ── 第二行：持仓指令（大字，含大涨过热过滤）──
+    _cf = combined.get("overheat_filter") if combined else None
+    y = 150
     cyb_signal = next((r.get("current_signal") for r in results if "error" not in r), None)
-    if cyb_signal == "红利":
-        hold_text = "空仓观望（不持红利）"
+    # 头条以科红方案最新持仓位为准(已含大涨过热过滤), 保证与方案表一致
+    if combined is not None:
+        _pos = combined.get("positions")
+        if _pos:
+            _p = _pos[-1]
+            if _p == 1:
+                cyb_signal = "成长"
+            elif _p == 0:
+                cyb_signal = "红利"
+    _cf_skip_now = bool(_cf and _cf.get("latest_signal_skipped"))
+    _cf_blocked = bool(_cf and _cf.get("blocked_at_end"))
+    if _cf_skip_now:
+        hold_text = "成长买入·大涨过热过滤→空仓"
+        hold_color = GOLD_COLOR
+        hold_bg = (60, 50, 10)
+    elif cyb_signal == "红利":
+        hold_text = "空仓观望（大涨过热窗口）" if _cf_blocked else "空仓观望"
         hold_color = RED_COLOR
         hold_bg = (60, 20, 20)
     elif cyb_signal == "成长":
-        if basket_info:
-            names = "、".join(t["name"] for t in basket_info["top3"])
-        else:
-            names = "科创50 TOP3"
+        names = "、".join(t["name"] for t in basket_info["top3"]) if basket_info else "科创50 TOP3"
         hold_text = f"持有{names}"
         hold_color = BLUE_COLOR
         hold_bg = (20, 30, 60)
@@ -2484,51 +2574,23 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         hold_color = GOLD_COLOR
         hold_bg = (60, 50, 10)
 
-    # 持仓指令背景框（大号高亮）
-    box_h = 130
+    box_h = 120
     draw.rectangle([(BORDER, y), (uniform_w - BORDER, y + box_h)],
                    fill=hold_bg)
     draw.rectangle([(BORDER, y), (uniform_w - BORDER, y + box_h)],
                    outline=hold_color, width=4)
     draw.text((BORDER + 30, y + 20), hold_text, fill=hold_color, font=font_hold)
+    y += box_h + 36
 
-    y += box_h + 40
-
-    # ── 距下次 TOP3 发布倒计时 ──
-    if basket_info and basket_info.get("next_effective"):
-        _ne = basket_info["next_effective"]
-        _dl = basket_info.get("days_left_effective", 0)
-        draw.text((BORDER, y),
-                  f"距离下次 TOP3 调整发布日期还剩 {_dl} 天", fill=GOLD_COLOR, font=font_sub)
-        y += 80
-        draw.text((BORDER, y), f"发布日期: {_ne}", fill=CAPTION_COLOR, font=font_sub)
-        y += 80
-        _new = basket_info.get("new_entries")
-        if _new:
-            _nm = "、".join(STOCK_NAMES.get(c, c) for c in _new)
-            draw.text((BORDER, y), f"★ 本期待新纳入 TOP3：{_nm}",
-                      fill=GOLD_COLOR, font=font_sub)
+    # ── 第三行：本期TOP3发布 + 下次发布 + 剩余时间 ──
+    if basket_info:
+        _cur = basket_info.get("cur_exec", "")
+        _next = basket_info.get("next_rebalance", "")
+        _dl = basket_info.get("days_left", 0)
+        draw.text((BORDER, y), f"本期TOP3: {_cur}  |  下次: {_next}（剩 {_dl} 天）",
+                  fill=GOLD_COLOR, font=font_sub)
     else:
         draw.text((BORDER, y), "（篮子信息获取中…）", fill=SUBTLE_COLOR, font=font_sub)
-
-    # ── 数据准确性校验状态条 ──
-    if freshness:
-        _fy = y + 24
-        _ov = freshness.get("overall", "OK")
-        _col = {"OK": GREEN_COLOR, "WARN": GOLD_COLOR, "CRITICAL": RED_COLOR}.get(_ov, GREEN_COLOR)
-        _t3 = freshness["top3"]
-        if _ov == "OK":
-            _txt = (f"✓ 数据校验通过 · TOP3(中证{_t3.get('live_date','?')})已联网验证"
-                    f" · 指数/个股价至 {freshness['expected_trading_day']}")
-        else:
-            _idx = freshness["index"]["state"]
-            _bk = freshness["basket"]["state"]
-            _txt = (f"⚠ 数据校验{('未通过' if _ov=='CRITICAL' else '提醒')} · "
-                    f"TOP3:{_t3['state']} · 指数:{_idx} · 个股:{_bk}"
-                    + (f" · {_t3.get('detail','')}" if _t3['state'].startswith('MISMATCH') else ""))
-        draw.rectangle([(BORDER, _fy - 8), (uniform_w - BORDER, _fy + 64)],
-                       fill=(20, 27, 34), outline=_col, width=3)
-        draw.text((BORDER + 20, _fy), _txt, fill=_col, font=font_sub)
 
     y_offset = HEADER_HEIGHT
 
@@ -2721,11 +2783,11 @@ def main():
         if top3_override:
             print(f"  [数据校验] 当前开放期改用中证实时TOP3: {top3_override['codes']}")
 
-    # 先算科创方案(含每段成长盈利映射), 供趋势图成长标记按盈亏着色
+    # 先算科红方案(含每段成长盈利映射), 供趋势图成长标记按盈亏着色
     try:
         combined = compute_combined_strategy(top3_override=top3_override)
     except Exception as e:
-        print(f"  [科创方案] 异常: {e}")
+        print(f"  [科红方案] 异常: {e}")
         combined = None
     profit_map = combined.get("growth_entry_profit") if combined else None
 
@@ -2754,17 +2816,21 @@ def main():
                 idx_name = result.get("index_pair", "未知").split(" vs ")[0]
                 all_chart_files.append((f"{idx_name} — {name_map.get(ctype, ctype)}", cpath))
 
-    # 科创方案(科创50 TOP3 篮子 × 红利信号) — 净值/逐年收益/逐年持仓
+    # 科红方案(科创50 TOP3 篮子 × 红利信号) — 净值/逐年收益/逐年持仓
     # (已在 analyze 前计算并供趋势图着色; 此处仅在异常时为 None 时补算)
     if combined is None:
         try:
             combined = compute_combined_strategy(top3_override=top3_override)
         except Exception as e:
-            print(f"  [科创方案] 异常: {e}")
+            print(f"  [科红方案] 异常: {e}")
             combined = None
     if combined:
-        print(f"  [科创方案] 总 {combined['total_ret']*100:+.0f}%  年化 {combined['ann_ret']*100:+.1f}%  "
+        print(f"  [科红方案] 总 {combined['total_ret']*100:+.0f}%  年化 {combined['ann_ret']*100:+.1f}%  "
               f"回撤 {combined['max_dd']*100:+.1f}%  ({combined['start_date']}~{combined['end_date']})")
+        _cf = combined.get("overheat_filter")
+        if _cf:
+            print(f"  [大涨过热过滤] 启用={'是' if _cf['enabled'] else '否'}  涨幅阈值={int(_cf['thresh']*100)}%  "
+                  f"历史过滤 {_cf['skipped']} 次买入  当前跳过={'是' if _cf['latest_signal_skipped'] else '否'}")
 
     # 逐笔交易收益率图 (第三张图: 散点+橘黄连线+年度收益柱融合)
     if combined:
@@ -2779,7 +2845,7 @@ def main():
                 trade_annual = compute_annual_returns(_dd, prep["cyb_growth_nav"])
             p = plot_trade_returns(holding_periods, trade_ret_path, annual=trade_annual)
             if p:
-                all_chart_files.append(("逐笔交易收益率（科创方案）", p))
+                all_chart_files.append(("逐笔交易收益率（科红方案）", p))
                 print(f"  [逐笔交易图] 已生成: {p}")
             # 透明化导出: 持仓周期写入 JSON, 供核对"最新收益"是否含当日
             try:
