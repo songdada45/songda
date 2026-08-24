@@ -2,3 +2,4 @@ matplotlib>=3.7
 requests>=2.28
 Pillow>=10.0
 numpy>=1.24
+xlrd>=2.0

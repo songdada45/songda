@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.growth_dividend_cache/
+.kechuang50_cache/
+.long_data/
+.mplcache/

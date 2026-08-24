@@ -56,11 +56,18 @@ OVERHEAT_THRESH = 0.50           # 先谷后峰涨幅阈值(涨>=50% 判定过�
 #   则本次成长期只用 HALF_POS_FRAC 仓位, 而非全仓. 跌幅照常扛, 但少亏一半本金.
 # 默认关闭: HALF_POS_ENABLED=False 时 simulate_enhanced 走原全仓逻辑, 行为不变.
 # 验证来源: half_position_test.py (W=60 触发7笔全亏, 半仓后总收益↑/夏普↑/回撤↓).
-HALF_POS_ENABLED = False          # 是否启用"建仓前涨幅超阈值则减半仓"
+HALF_POS_ENABLED = True           # 是否启用"建仓前涨幅超阈值则减半仓" (用户2026-08-24指定: W=60 启用)
 HALF_POS_WINDOW = 60             # 回看窗口(交易日, 约1季度) — 验证表明 W=60 优于 W=20
 HALF_POS_LOW = 0.25              # 建仓前涨幅下界(25%)
 HALF_POS_HIGH = 0.50             # 建仓前涨幅上界(50%)
 HALF_POS_FRAC = 0.5              # 触发时的仓位系数(0.5=半仓)
+
+# ─── 回测/报告起点 & 剔除个股 ─────────────────────────
+# 用户2026-08-24指定: 两个方案均从 2017-01-01 起做(抛开乐视网早期异常, 此前数据不要)。
+# 仅裁剪回测/报告窗口; 信号MA仍用全量历史做预热, 不影响2017+信号判定。
+BACKTEST_START_DATE = "2017-01-01"
+# 乐视网(300104): 退市异常股, 从所有篮子中剔除(抛开意外); 2017+篮子本已不含, 此处置为防御性兜底。
+EXCLUDE_STOCKS = ["300104"]
 
 # 收盘固化阈值: A股15:00收盘(含14:57-15:00集合竞价), 15:10后数据方视为当日终值。
 # 盘中(或收盘竞价未结束)写入的"今日"价一律视为临时值, 下次运行强制重抓,
@@ -507,10 +514,13 @@ def get_bucket_codes(date_str, schedule=SCHEDULE):
 
 def _resolve_bucket(date_str: str, override: dict | None = None) -> list:
     """统一解析某日应持 TOP3: 国证已变更且属当前期时, 用 override 实时名单;
-    否则用硬编码 SCHEDULE。override = {"from": 执行日, "codes": [...]}。"""
+    否则用硬编码 SCHEDULE。override = {"from": 执行日, "codes": [...]}。
+    末尾剔除 EXCLUDE_STOCKS(乐视网等异常股), 抛开意外。"""
     if override and date_str >= override.get("from", ""):
-        return override["codes"]
-    return get_bucket_codes(date_str)
+        codes = override["codes"]
+    else:
+        codes = get_bucket_codes(date_str)
+    return [c for c in codes if c not in EXCLUDE_STOCKS]
 
 
 def align_to_master_basket(recs, master_dates, zero_after_last=True):
@@ -541,26 +551,78 @@ def align_to_master_basket(recs, master_dates, zero_after_last=True):
     return opens, closes
 
 
-def _half_pos_weight(master_dates, i, index_closes):
-    """建仓日(i)前 HALF_POS_WINDOW 日, 创业板指从低点涨幅; 落[LOW,HIGH]则半仓.
+def _half_pos_info(master_dates, i, index_closes):
+    """建仓日(i)前 HALF_POS_WINDOW 日, 指数(399006/000688)从低点涨幅 → 仓位与原因。
 
-    口径: runup = index_closes[i] / min(index_closes[lo..i]) - 1
-    与 half_position_test.py 验证口径一致(建仓日收盘 / 近W日最低收盘 - 1)。
-    默认关闭或数据不足时返回 1.0(全仓, 不改变原行为)。
+    三档(用户2026-08-24指定):
+      runup < LOW(25%)     → 权重1.0  正常区(历史正常盈利)
+      LOW~HIGH(25-50%)     → 权重0.5  追高雷区(历史该区全亏→减半仓控风险)
+      runup > HIGH(>50%)   → 权重1.0  极端强势区(历史该区100%盈利→全仓)
+    口径: runup = index_closes[i] / min(index_closes[lo..i]) - 1, 与 half_position_test.py 一致。
+    默认关闭或数据不足时返回全仓默认。
     """
+    _def = {"weight": 1.0, "zone": "正常区", "runup": None,
+            "reason": "减半仓未启用/数据不足, 默认全仓"}
     if not HALF_POS_ENABLED or index_closes is None or i <= 0:
-        return 1.0
+        return _def
     lo = max(0, i - HALF_POS_WINDOW)
     window = index_closes[lo:i + 1]
     if not window:
-        return 1.0
+        return _def
     low = min(window)
     if low <= 0:
-        return 1.0
+        return _def
     runup = index_closes[i] / low - 1.0
+    if runup < HALF_POS_LOW:
+        return {"weight": 1.0, "zone": "正常区", "runup": runup,
+                "reason": f"建仓前涨幅{runup*100:.1f}% < {HALF_POS_LOW*100:.0f}%, 正常建仓全仓"}
     if HALF_POS_LOW <= runup <= HALF_POS_HIGH:
-        return HALF_POS_FRAC
-    return 1.0
+        return {"weight": HALF_POS_FRAC, "zone": "追高雷区", "runup": runup,
+                "reason": f"建仓前涨幅{runup*100:.1f}% 落{HALF_POS_LOW*100:.0f}%-{HALF_POS_HIGH*100:.0f}%雷区(历史全亏), 减半仓控风险"}
+    return {"weight": 1.0, "zone": "极端强势区", "runup": runup,
+            "reason": f"建仓前涨幅{runup*100:.1f}% > {HALF_POS_HIGH*100:.0f}%(历史100%盈利), 全仓"}
+
+
+def _half_pos_weight(master_dates, i, index_closes):
+    """建仓日(i)前指数从低点涨幅; 落[LOW,HIGH]则半仓. 返回仓位系数(float), 供净值模拟。"""
+    return _half_pos_info(master_dates, i, index_closes)["weight"]
+
+
+def _annotate_period_positions(combined: dict, cyb_closes: list, master_dates: list) -> list:
+    """给每个成长期持仓周期附上建仓前涨幅/仓位/原因(仓位控制·每期报告用)。"""
+    periods = _compute_holding_periods(combined) if combined else []
+    d2i = {d: k for k, d in enumerate(master_dates)}
+    out = []
+    for p in periods:
+        bi = d2i.get(p["buy"])
+        info = _half_pos_info(master_dates, bi, cyb_closes) if bi is not None else \
+            {"weight": 1.0, "zone": "正常区", "runup": None, "reason": "全仓"}
+        q = dict(p)
+        q["runup"] = info["runup"]
+        q["weight"] = info["weight"]
+        q["zone"] = info["zone"]
+        q["pos_reason"] = info["reason"]
+        q["pos_label"] = "半仓" if info["weight"] < 1.0 else "全仓"
+        out.append(q)
+    return out
+
+
+def _current_position_info(combined: dict, cyb_closes: list, master_dates: list) -> dict:
+    """当前持仓的仓位控制建议(每日报告前置展示)。"""
+    pos = combined.get("positions") if combined else None
+    if not pos:
+        return {"in_growth": False, "weight": 0.0, "zone": "空仓", "runup": None,
+                "reason": "无信号, 默认空仓", "entry_date": None}
+    if pos[-1] != 1:
+        return {"in_growth": False, "weight": 0.0, "zone": "空仓", "runup": None,
+                "reason": "当前红利期, 空仓持币(无仓位)", "entry_date": None}
+    n = len(pos)
+    i = n - 1
+    while i > 0 and pos[i - 1] == 1:
+        i -= 1
+    info = _half_pos_info(master_dates, i, cyb_closes)
+    return {"in_growth": True, "weight": info["weight"], "zone": info["zone"],
+            "runup": info["runup"], "reason": info["reason"], "entry_date": master_dates[i]}
 
 
 def simulate_enhanced(master_dates, sig_by_date, stock_open, stock_close,
@@ -1700,6 +1762,19 @@ def compute_combined_strategy(top3_override=None) -> dict | None:
             stock_open[code] = o
             stock_close[code] = c
 
+        # ── 回测/报告起点: 从 BACKTEST_START_DATE 起(用户要求2017年起, 抛开乐视早期异常) ──
+        _si = 0
+        for _k, _d in enumerate(master_dates):
+            if _d >= BACKTEST_START_DATE:
+                _si = _k
+                break
+        if _si > 0:
+            master_dates = master_dates[_si:]
+            cyb_closes = cyb_closes[_si:]
+            div_closes = div_closes[_si:]
+            stock_open = {_c: _a[_si:] for _c, _a in stock_open.items()}
+            stock_close = {_c: _a[_si:] for _c, _a in stock_close.items()}
+
         nav, positions = simulate_enhanced(master_dates, sig_by_date,
                                            stock_open, stock_close, None, None, False,
                                            top3_override=top3_override,
@@ -1754,7 +1829,7 @@ def compute_combined_strategy(top3_override=None) -> dict | None:
         total = nav[-1] / nav[0] - 1
         ann = (nav[-1] / nav[0]) ** (1 / years) - 1 if nav[0] > 0 else 0
 
-        return {
+        result = {
             "nav": nav, "dates": master_dates, "positions": positions,
             "combined_annual": combined_annual, "combined_holdings": combined_holdings,
             "growth_entry_profit": growth_entry_profit_map(master_dates, positions, nav),
@@ -1769,6 +1844,10 @@ def compute_combined_strategy(top3_override=None) -> dict | None:
                 "latest_signal_skipped": _cf_latest,
             },
         }
+        # 仓位控制(每期报告前置)
+        result["period_positions"] = _annotate_period_positions(result, cyb_closes, master_dates)
+        result["current_position"] = _current_position_info(result, cyb_closes, master_dates)
+        return result
     except Exception as e:
         print(f"  [创红方案] 计算异常: {e}")
         return None
@@ -2428,19 +2507,23 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
             draw.text((x, _sy), _sl, fill=SUBTLE_COLOR, font=font_small)
             _sy += 44
 
-        # ── 6 列布局（"状态"→"创业板指涨幅"对比列）──
-        w_buy = width * 0.15
-        w_sell = width * 0.15
-        w_top3 = width * 0.30       # 略缩给新列腾空间
-        w_ret = width * 0.13
-        w_cyb = width * 0.13        # 创业板指涨幅（与区间收益等宽）
-        w_days = width - (w_buy + w_sell + w_top3 + w_ret + w_cyb)  # 天数占余数
+        # ── 8 列布局（含 建仓前涨幅 / 仓位 两列仓位控制信息）──
+        w_buy = width * 0.12
+        w_sell = width * 0.12
+        w_top3 = width * 0.24
+        w_ret = width * 0.11
+        w_cyb = width * 0.11
+        w_runup = width * 0.12       # 建仓前涨幅(仓位控制)
+        w_pos = width * 0.10         # 仓位(全/半)
+        w_days = width - (w_buy + w_sell + w_top3 + w_ret + w_cyb + w_runup + w_pos)
         x_buy = x
         x_sell = x + w_buy
         x_top3 = x_sell + w_sell
         x_ret = x_top3 + w_top3
         x_cyb = x_ret + w_ret
-        x_days = x_cyb + w_cyb
+        x_runup = x_cyb + w_cyb
+        x_pos = x_runup + w_runup
+        x_days = x_pos + w_pos
 
         HEADER_ROW_H = 84
         ROW_H = 76
@@ -2455,6 +2538,8 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         draw.text((x_top3 + 16, _hx), "持有TOP3（等权）", fill=CAPTION_COLOR, font=font_small)
         draw.text((x_ret + 16, _hx), "区间收益", fill=CAPTION_COLOR, font=font_small)
         draw.text((x_cyb + 16, _hx), "创业板指", fill=CAPTION_COLOR, font=font_small)
+        draw.text((x_runup + 16, _hx), "建仓前涨幅", fill=GOLD_COLOR, font=font_small)
+        draw.text((x_pos + 16, _hx), "仓位", fill=GOLD_COLOR, font=font_small)
         draw.text((x_days + 16, _hx), "持有天数", fill=CAPTION_COLOR, font=font_small)
 
         ry = ty + HEADER_ROW_H
@@ -2511,11 +2596,22 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
             else:
                 draw.text((x_cyb + 16, ry24), "-", fill=SUBTLE_COLOR, font=font_small)
 
+            # 建仓前涨幅 + 仓位(仓位控制·每期报告)
+            _ru = p.get("runup")
+            if _ru is not None:
+                _ruc = RED_COLOR if _ru >= HALF_POS_LOW else CAPTION_COLOR
+                draw.text((x_runup + 16, ry24), f"{_ru*100:+.1f}%", fill=_ruc, font=font_small)
+            else:
+                draw.text((x_runup + 16, ry24), "-", fill=SUBTLE_COLOR, font=font_small)
+            _pl = p.get("pos_label", "全仓")
+            _pc = GOLD_COLOR if _pl == "半仓" else BLUE_COLOR
+            draw.text((x_pos + 16, ry24), _pl, fill=_pc, font=font_small)
+
             draw.text((x_days + 16, ry24), f"{p['days']}天", fill=CAPTION_COLOR, font=font_small)
             ry += ROW_H
 
         for xg in [x, x_buy + w_buy, x_sell + w_sell, x_top3 + w_top3,
-                   x_ret + w_ret, x_cyb + w_cyb, x + width]:
+                   x_ret + w_ret, x_cyb + w_cyb, x_runup + w_runup, x_pos + w_pos, x + width]:
             draw.line([(xg, ty), (xg, ry)], fill=SEP_COLOR, width=1)
 
     # ── 计算总高度 ──
@@ -2559,7 +2655,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     history_height = 0
     holding_periods = []
     if combined:
-        holding_periods = _compute_holding_periods(combined)
+        holding_periods = combined.get("period_positions") or _compute_holding_periods(combined)
         # 最新买入周期排最前, 方便查看当前持仓与最新收益(与年度表一致: 最新在上)
         holding_periods.sort(key=lambda p: p["buy"], reverse=True)
         _n = len(holding_periods)
@@ -2615,9 +2711,14 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         hold_bg = (60, 20, 20)
     elif cyb_signal == "成长":
         names = "、".join(t["name"] for t in basket_info["top3"]) if basket_info else "创业板50 TOP3"
-        hold_text = f"持有{names}"
-        hold_color = BLUE_COLOR
-        hold_bg = (20, 30, 60)
+        _cp = combined.get("current_position") if combined else None
+        _pos_suffix = ""
+        if _cp and _cp.get("in_growth"):
+            _pos_suffix = f"（{_cp['pos_label']}·{_cp['zone']}）"
+        hold_text = f"持有{names}{_pos_suffix}"
+        _half = bool(_cp and _cp.get("weight", 1.0) < 1.0)
+        hold_color = GOLD_COLOR if _half else BLUE_COLOR
+        hold_bg = (60, 50, 10) if _half else (20, 30, 60)
     else:
         hold_text = "信号不一致，按创业板指信号执行"
         hold_color = GOLD_COLOR
@@ -2906,6 +3007,26 @@ def main():
                       f"| 区间收益 {_latest['ret']*100:+.1f}% | {_latest['status']}")
             except Exception as _e:
                 print(f"  [持仓核对] 导出失败: {_e}")
+            # 每期仓位控制报告(CSV)
+            if combined.get("period_positions"):
+                try:
+                    import csv as _csv
+                    _csvp = CACHE_DIR / f"position_control_{date_str}.csv"
+                    with open(_csvp, "w", newline="", encoding="utf-8-sig") as _f:
+                        _w = _csv.writer(_f)
+                        _w.writerow(["买入日期", "卖出日期", "持有TOP3", "建仓前涨幅", "仓位",
+                                     "区间收益", "持有天数", "状态"])
+                        for _p in combined["period_positions"]:
+                            _ru = _p.get("runup")
+                            _w.writerow([
+                                _p["buy"], _p["sell"] or "持有中",
+                                "/".join(STOCK_NAMES.get(c, c) for c in _p["top3"]),
+                                f"{_ru*100:+.1f}%" if _ru is not None else "-",
+                                _p.get("pos_label", "全仓"), f"{_p['ret']*100:+.1f}%",
+                                f"{_p['days']}天", _p["status"]])
+                    print(f"  [每期仓位报告] 已生成: {_csvp}")
+                except Exception as _e:
+                    print(f"  [每期仓位报告] 生成失败: {_e}")
         except Exception as e:
             print(f"  [逐笔交易图] 生成失败: {e}")
 
@@ -2951,6 +3072,17 @@ def main():
         if _ov != "OK":
             _line += "\n⚠ " + " | ".join(freshness["messages"])
         summary += _line
+    # 仓位控制摘要(每期报告前置)
+    if combined:
+        _cp = combined.get("current_position")
+        if _cp:
+            if not _cp.get("in_growth"):
+                _ptxt = "空仓（红利期, 持币无仓位）"
+            elif _cp.get("weight", 1.0) < 1.0:
+                _ptxt = f"半仓（{_cp['reason']}）"
+            else:
+                _ptxt = f"全仓（{_cp['reason']}）"
+            summary += f"\n\n【仓位控制】当前建议: {_ptxt}"
     (CACHE_DIR / "latest_summary.txt").write_text(summary, encoding="utf-8")
     print("\n\n" + summary)
 
