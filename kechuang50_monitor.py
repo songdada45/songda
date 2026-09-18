@@ -1708,6 +1708,58 @@ def overheat_skip_filter(master_dates: list[str], growth_closes: list[float],
     return eff, skipped, blocked, latest_signal_skipped
 
 
+def overheat_relief_estimate(growth_closes: list[float], master_dates: list[str],
+                             lookback: int = OVERHEAT_LOOKBACK,
+                             thresh: float = OVERHEAT_THRESH) -> dict:
+    """估算"大涨过热过滤"的预计自动解除日期, 供报告提示(不改任何过滤逻辑)。
+
+    原理: 过热由窗口内"先谷后峰涨幅>=thresh"触发; 随着窗口前滚, 触发该过热的临界谷
+    (close <= peak/(1+thresh)) 滚出 lookback 交易日窗口后, 若期间不出现新的>=thresh
+    谷峰组合, 过热自动解除。本函数定位窗口内最晚一个临界谷, 推算其滚出窗口的预计日期。
+    """
+    n = len(growth_closes)
+    if n < 2 or not master_dates or n != len(master_dates):
+        return {"active": False}
+    active = _overheat_flag(growth_closes, n - 1, lookback, thresh) if n >= lookback else False
+    if not active:
+        return {"active": False}
+    w_start = max(0, n - lookback)
+    win = growth_closes[w_start:]
+    if len(win) < 2:
+        return {"active": True}
+    peak_val = max(win)
+    peak_idx = w_start + win.index(peak_val)
+    peak_date = master_dates[peak_idx]
+    threshold_low = peak_val / (1.0 + thresh)
+    crit = [(master_dates[w_start + i], win[i]) for i in range(len(win)) if win[i] <= threshold_low]
+    if not crit:
+        return {"active": True, "peak": peak_val, "peak_date": peak_date,
+                "threshold_low": threshold_low}
+    crit.sort()
+    last_low_date, last_low = crit[-1]
+    g = master_dates.index(last_low_date)
+    need = g + lookback - (n - 1)
+    if need < 0:
+        need = 0
+    relief_idx = (n - 1) + need
+    if relief_idx < n:
+        relief_date = master_dates[relief_idx]
+    else:
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            d0 = _dt.strptime(master_dates[-1], "%Y-%m-%d")
+            relief_date = (d0 + _td(days=int(need * 1.4))).strftime("%Y-%m-%d")
+        except Exception:
+            relief_date = "约%d个交易日后" % need
+    return {
+        "active": True,
+        "peak": peak_val, "peak_date": peak_date,
+        "threshold_low": threshold_low,
+        "trigger_low_date": last_low_date, "trigger_low": last_low,
+        "need_trading_days": need,
+        "relief_date": relief_date,
+    }
+
 def compute_combined_strategy(top3_override=None) -> dict | None:
     """科红方案(科创50 TOP3 篮子 × 红利信号)净值/逐年收益/逐年持仓。
 
@@ -1747,6 +1799,9 @@ def compute_combined_strategy(top3_override=None) -> dict | None:
         # ── 大涨过热过滤 (纯跳过): 应用到科红方案信号流 ──
         sig_by_date, _cf_skip, _cf_block, _cf_latest = overheat_skip_filter(
             master_dates, cyb_closes, sig_by_date)
+        # 过热解除预计时间(供报告提示, 不改任何过滤逻辑)
+        _cf_relief = overheat_relief_estimate(cyb_closes, master_dates,
+                                             OVERHEAT_LOOKBACK, OVERHEAT_THRESH)
 
         # 个股 hfq (乐视退市特例 qfq)
         stock_open, stock_close = {}, {}
@@ -1842,6 +1897,7 @@ def compute_combined_strategy(top3_override=None) -> dict | None:
                 "skipped": _cf_skip,
                 "blocked_at_end": _cf_block,
                 "latest_signal_skipped": _cf_latest,
+                "relief": _cf_relief,
             },
         }
         # 仓位控制(每期报告前置)
@@ -2248,7 +2304,7 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     from PIL import Image, ImageDraw, ImageFont
 
     BORDER = 50          # 边距（加大）
-    HEADER_HEIGHT = 420   # 顶部摘要区（三行：方案+数据日期 / 持仓指令 / TOP3日期）
+    HEADER_HEIGHT = 470   # 顶部摘要区（含过热解除提示 / 持仓指令 / TOP3日期）
     BG_COLOR = (13, 17, 23)         # #0d1117
     CAPTION_COLOR = (230, 237, 243)  # #e6edf3
     SEP_COLOR = (48, 54, 61)         # #30363d
@@ -2736,6 +2792,17 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     else:
         draw.text((BORDER, y), "（篮子信息获取中…）", fill=SUBTLE_COLOR, font=font_sub)
 
+    # ── 第四行：过热过滤预计解除提示(仅当前处于过热窗口时显示) ──
+    if _cf and _cf.get("relief", {}).get("active"):
+        _rel = _cf["relief"]
+        _ry = 360
+        draw.text((BORDER, _ry),
+                  f"过热过滤预计解除: 约 {_rel['relief_date']} 前后",
+                  fill=GOLD_COLOR, font=font_sub)
+        draw.text((BORDER, _ry + 52),
+                  f"触发源 {_rel['trigger_low_date']} 低点{_rel['trigger_low']:.0f} · 待滚出120日窗口",
+                  fill=SUBTLE_COLOR, font=font_body)
+
     y_offset = HEADER_HEIGHT
 
     # ════════════════════════════════════════════
@@ -2975,6 +3042,11 @@ def main():
         if _cf:
             print(f"  [大涨过热过滤] 启用={'是' if _cf['enabled'] else '否'}  涨幅阈值={int(_cf['thresh']*100)}%  "
                   f"历史过滤 {_cf['skipped']} 次买入  当前跳过={'是' if _cf['latest_signal_skipped'] else '否'}")
+            _rel = _cf.get("relief", {})
+            if _rel.get("active"):
+                print(f"  [过热解除预计] 约 {_rel['relief_date']} 前后  "
+                      f"(触发源 {_rel['trigger_low_date']} 低点{_rel['trigger_low']:.0f}, "
+                      f"待滚出120日窗口, 还需约{_rel['need_trading_days']}交易日)")
 
     # 逐笔交易收益率图 (第三张图: 散点+橘黄连线+年度收益柱融合)
     if combined:
