@@ -84,6 +84,20 @@ def render_daily_report(result, combined=None, basket_info=None, freshness=None,
     lower = result.get("current_lower")
     growth_label = (result.get("index_pair") or "成长 vs 红利").split(" vs ")[0]
     last = (result.get("recent_10d") or [{}])[-1]
+
+    # ── 数据可用性优先：STALE/CRITICAL 时绝不生成交易信号 ──
+    _f = freshness or {}
+    _idx = (_f.get("index") or {}).get("state", "?")
+    _bk = (_f.get("basket") or {}).get("state", "?")
+    _data_bad = bool(_f) and (_f.get("overall") != "OK" or _idx != "OK" or _bk not in ("OK", "?"))
+    _stale_days = None
+    try:
+        if date:
+            _stale_days = (datetime.date.today() - datetime.date.fromisoformat(date)).days
+    except Exception:
+        _stale_days = None
+    if _stale_days is not None and _stale_days > 3:
+        _data_bad = True
     g_close = last.get("growth_close")
     d_close = last.get("dividend_close")
     date = result.get("latest_date", "")
@@ -107,15 +121,29 @@ def render_daily_report(result, combined=None, basket_info=None, freshness=None,
 
     lines = []
     title_tag = "（盘中，非最终信号）" if intraday else "（收盘）"
-    lines.append(f"{'🟩' if in_growth else '🟥'} {scheme}方案 · "
-                 f"{'持仓' if in_growth else '空仓'}   {date} {title_tag}")
+    _head = "⛔" if _data_bad else ("🟩" if in_growth else "🟥")
+    lines.append(f"{_head} {scheme}方案 · "
+                 f"{'持仓' if in_growth else '空仓'}   {date} {title_tag}"
+                 + ("   ⚠️ 数据异常" if _data_bad else ""))
     lines.append("─" * 34)
 
     # ── 1. 今日结论（最重要，放最上面） ──
-    action, detail = _verdict(sig, in_growth, need_up, down_to_sell,
-                              result.get("signal_change"), weight)
-    lines.append(action)
-    lines.append(f"   {detail}")
+    if _data_bad:
+        _why = []
+        if _stale_days is not None and _stale_days > 3:
+            _why.append(f"数据停留在 {date}（落后 {_stale_days} 天）")
+        if _idx != "OK":
+            _why.append(f"指数 {_idx}")
+        if _bk not in ("OK", "?"):
+            _why.append(f"个股 {_bk}")
+        lines.append("⛔ 数据异常：今日不生成交易信号")
+        lines.append("   " + ("；".join(_why) if _why else "数据校验未通过"))
+        lines.append("   请勿据此操作。排查：看 Actions 日志里行情接口是否返回 501/超时。")
+    else:
+        action, detail = _verdict(sig, in_growth, need_up, down_to_sell,
+                                  result.get("signal_change"), weight)
+        lines.append(action)
+        lines.append(f"   {detail}")
     lines.append("")
 
     # ── 2. 现在在哪 ──

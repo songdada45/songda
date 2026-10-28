@@ -200,14 +200,48 @@ CNINDEX_TOP3_URL = "https://www.cnindex.com.cn/sample-detail/download-history?in
 
 # ─── 数据获取 (四层容灾) ──────────────────────────────
 
+
+# ─── 行情请求：重试 + 退避 + 限速（CI 上腾讯会对高频请求返回 501） ───
+_LAST_REQ_TS = [0.0]
+
+
+def _throttle(min_interval: float = 0.12):
+    import time as _t
+    dt = _t.time() - _LAST_REQ_TS[0]
+    if dt < min_interval:
+        _t.sleep(min_interval - dt)
+    _LAST_REQ_TS[0] = _t.time()
+
+
+def http_get_json(url: str, params: dict, timeout: int = 15, retries: int = 4, tag: str = ""):
+    """带重试的 GET JSON。对 429/5xx 做指数退避（1.5s, 3s, 6s）。"""
+    import time as _t
+    last = None
+    for attempt in range(retries):
+        _throttle()
+        try:
+            resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+            if resp.status_code in (429, 500, 501, 502, 503, 504):
+                last = f"HTTP {resp.status_code}"
+                _t.sleep(1.5 * (2 ** attempt))
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:  # noqa: BLE001
+            last = f"{type(e).__name__}: {e}"
+            _t.sleep(0.8 * (attempt + 1))
+    print(f"  [行情] {tag or url} 重试 {retries} 次仍失败: {last}")
+    return None
+
+
 def fetch_tencent_kline(market: str, code: str, days: int, adj: str = "qfq") -> list[dict] | None:
     """从腾讯财经获取日K线 (adj: qfq|hfq)。用\"最近days\"格式, 含当日已收盘数据。"""
-    url = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     params = {"param": f"{market}{code},day,,,{days},{adj}"}
     try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+        data = http_get_json(url, params, tag=f"腾讯 {market}{code}")
+        if not data:
+            return None
         klines = data.get("data", {}).get(f"{market}{code}", {}).get("qfqday", []) or \
                  data.get("data", {}).get(f"{market}{code}", {}).get("day", [])
         if not klines:
@@ -385,12 +419,12 @@ def get_index_data(index_info: dict) -> list[dict] | None:
 
 def _fetch_one_chunk_basket(market, code, start, end, adj):
     """抓取单块日K线; adj='hfq'|'qfq'; 解析 hfqday/qfqday/day"""
-    url = "http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+    url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     params = {"param": f"{market}{code},day,{start},{end},800,{adj}"}
     try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
+        data = http_get_json(url, params, tag=f"{market}{code} {start}~{end}")
+        if not data:
+            return []
         node = data.get("data", {}).get(f"{market}{code}", {})
         if not isinstance(node, dict):
             return []
