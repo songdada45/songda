@@ -1,0 +1,41 @@
+name: probe-request-style
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q requests
+      - name: 对比 逗号编码 / 请求头 对腾讯接口的影响
+        run: |
+          python - <<'PY'
+          import requests
+          base = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+          p = {"param": "sz399006,day,,,5,qfq"}
+          UA_CHROME = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                       "Referer": "https://finance.sina.com.cn/"}
+
+          def show(tag, fn):
+              try:
+                  r = fn()
+                  print(f"{tag:<42} HTTP={r.status_code} len={len(r.content)} head={r.text[:60]!r}")
+              except Exception as e:
+                  print(f"{tag:<42} EXC {type(e).__name__}: {e}")
+
+          show("A requests+params(编码逗号)", lambda: requests.get(base, params=p, timeout=15))
+          show("B requests+params+Chrome头", lambda: requests.get(base, params=p, headers=UA_CHROME, timeout=15))
+          show("C 字面逗号拼接URL", lambda: requests.get(f"{base}?param=sz399006,day,,,5,qfq", timeout=15))
+          show("D 字面逗号+Chrome头", lambda: requests.get(f"{base}?param=sz399006,day,,,5,qfq", headers=UA_CHROME, timeout=15))
+          show("E 字面逗号+仅Referer", lambda: requests.get(f"{base}?param=sz399006,day,,,5,qfq",
+                                                             headers={"Referer": "https://finance.sina.com.cn/"}, timeout=15))
+          r = requests.get(base, params=p, timeout=15)
+          print("A 实际请求URL:", r.request.url)
+          r = requests.get(f"{base}?param=sz399006,day,,,5,qfq", timeout=15)
+          print("C 实际请求URL:", r.request.url)
+          PY
