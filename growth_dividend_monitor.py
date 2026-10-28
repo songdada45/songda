@@ -205,7 +205,7 @@ CNINDEX_TOP3_URL = "https://www.cnindex.com.cn/sample-detail/download-history?in
 _LAST_REQ_TS = [0.0]
 
 
-def _throttle(min_interval: float = 0.12):
+def _throttle(min_interval: float = 0.35):
     import time as _t
     dt = _t.time() - _LAST_REQ_TS[0]
     if dt < min_interval:
@@ -213,7 +213,7 @@ def _throttle(min_interval: float = 0.12):
     _LAST_REQ_TS[0] = _t.time()
 
 
-def http_get_json(url: str, params: dict, timeout: int = 15, retries: int = 4, tag: str = ""):
+def http_get_json(url: str, params: dict, timeout: int = 20, retries: int = 6, tag: str = ""):
     """带重试的 GET JSON。对 429/5xx 做指数退避（1.5s, 3s, 6s）。"""
     import time as _t
     last = None
@@ -223,7 +223,7 @@ def http_get_json(url: str, params: dict, timeout: int = 15, retries: int = 4, t
             resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
             if resp.status_code in (429, 500, 501, 502, 503, 504):
                 last = f"HTTP {resp.status_code}"
-                _t.sleep(1.5 * (2 ** attempt))
+                _t.sleep(min(2.0 * (2 ** attempt), 30.0))
                 continue
             resp.raise_for_status()
             return resp.json()

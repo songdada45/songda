@@ -37,6 +37,9 @@ jobs:
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
         run: python growth_dividend_monitor.py
+      - name: 冷却 60s，避免同一出口 IP 连续请求被限流
+        run: sleep 60
+
       - name: 运行科创50/红利风格轮动监控(科创版)
         continue-on-error: true
         env:
