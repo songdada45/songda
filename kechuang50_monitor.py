@@ -23,6 +23,22 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
+
+CN_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def now_cn() -> datetime:
+    """北京时间（naive，与原来的 now_cn() 用法兼容）。
+
+    原来的实现直接用 now_cn()，而 GitHub Actions runner 是 UTC，
+    导致 15:10 收盘固化判断在线上永远失效（每天全量重抓）。统一改用北京时间。
+    """
+    return datetime.now(CN_TZ).replace(tzinfo=None)
+
+
+def today_cn() -> date:
+    return now_cn().date()
 from pathlib import Path
 
 import requests
@@ -276,7 +292,7 @@ def load_cache(index_code: str) -> dict | None:
 
 def save_cache(index_code: str, records: list[dict]):
     payload = {"version": CACHE_VERSION, "records": records,
-               "saved_at": datetime.now().isoformat(timespec="seconds")}
+               "saved_at": now_cn().isoformat(timespec="seconds")}
     (CACHE_DIR / f"{index_code}.json").write_text(
         json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
@@ -332,7 +348,7 @@ def get_index_data(index_info: dict) -> list[dict] | None:
         cached = cached_full.get("records", [])
         if len(cached) >= 15:
             latest_date = max(r["date"] for r in cached)
-            today_str = datetime.now().strftime("%Y-%m-%d")
+            today_str = now_cn().strftime("%Y-%m-%d")
             if latest_date >= today_str and _cache_finalized_today(
                     cached_full.get("saved_at"), today_str):
                 # 缓存含今日且为收盘后固化的终值 → 复用, 不必重新抓取
@@ -460,12 +476,12 @@ def load_or_fetch_basket(market, code, adj):
                 cached_saved_at = d.get("saved_at")
         except Exception:
             pass
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = now_cn().strftime("%Y-%m-%d")
 
     def _merge_and_save(merged):
         cf.write_text(json.dumps(
             {"version": BASKET_CACHE_VERSION, "records": merged,
-             "saved_at": datetime.now().isoformat(timespec="seconds")},
+             "saved_at": now_cn().isoformat(timespec="seconds")},
             ensure_ascii=False), encoding="utf-8")
 
     if cached:
@@ -478,7 +494,7 @@ def load_or_fetch_basket(market, code, adj):
         else:
             print(f"  篮子 {market}{code}({adj}) 缓存非今日({latest_date})，增量补齐至 {today_str}...")
         try:
-            end_d = (datetime.now() + timedelta(days=400)).strftime("%Y-%m-%d")
+            end_d = (now_cn() + timedelta(days=400)).strftime("%Y-%m-%d")
             new_recs = fetch_kline_basket(market, code, start=latest_date, end=end_d, adj=adj)
             if new_recs:
                 by = {r["date"]: r for r in cached}
@@ -1016,11 +1032,11 @@ def analyze(growth_key: str, growth_profit_map=None, prep=None) -> dict:
         "distance_to_lower": round((current["ratio"] / current["lower"] - 1) * 100, 2),
         "signal_change": signal_change,
         "recent_10d": recent,
-        "fetch_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "fetch_time": now_cn().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
     # 生成可视化图表 (长期趋势、短期细节)
-    date_str = datetime.now().strftime("%Y%m%d")
+    date_str = now_cn().strftime("%Y%m%d")
     code = growth_info["code"]
     chart_paths = []
 
@@ -1606,7 +1622,7 @@ def prepare_backtest_data() -> dict | None:
 
 def save_report(result: dict, report_text: str):
     """保存报告"""
-    date_str = datetime.now().strftime("%Y%m%d")
+    date_str = now_cn().strftime("%Y%m%d")
     (CACHE_DIR / f"report_{date_str}.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     (CACHE_DIR / f"report_{date_str}.txt").write_text(report_text, encoding="utf-8")
@@ -1965,7 +1981,7 @@ def _next_trading_day(d: datetime.date, holidays=None) -> datetime.date:
 def compute_next_rebalance(today=None):
     """返回 (下次生效日 date, 距今天数 int)"""
     if today is None:
-        today = datetime.date.today()
+        today = today_cn()
     cands = []
     for y in (today.year, today.year + 1):
         for m in (6, 12):
@@ -1978,7 +1994,7 @@ def compute_next_rebalance(today=None):
 
 def get_current_basket_info() -> dict:
     """当前篮子 TOP3 + 下次调仓 + 关键日期; 联网抓取并与硬编码名单交叉核对。"""
-    today = date.today()
+    today = today_cn()
     tstr = today.strftime("%Y-%m-%d")
     live = fetch_kc50_top3()
     hard = get_bucket_codes(tstr)
@@ -2029,7 +2045,7 @@ def get_current_basket_info() -> dict:
 
 def _last_trading_day(as_of=None) -> "date":
     """as_of(默认今天) 当日或之前最近的交易日(跳过周末)。"""
-    d = as_of or date.today()
+    d = as_of or today_cn()
     while d.weekday() >= 5:
         d -= timedelta(days=1)
     return d
@@ -2068,7 +2084,7 @@ def verify_data_freshness(basket_info: dict | None = None) -> dict:
       - 指数/个股价: 比对缓存最新日与「最近交易日」, 滞后→STALE。
     CRITICAL 且属当前期时, 主流程改用中证实时 TOP3 计算当前开放期(绝不静默用旧名单)。
     """
-    today = date.today()
+    today = today_cn()
     expected = _last_trading_day(today)
     expected_str = expected.strftime("%Y-%m-%d")
     msgs = []
@@ -2728,10 +2744,10 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
     draw.line([(0, HEADER_HEIGHT - 2), (uniform_w, HEADER_HEIGHT - 2)],
               fill=SEP_COLOR, width=3)
 
-    fetch_time = results[0].get("fetch_time", "") if results else datetime.now().strftime("%Y-%m-%d %H:%M")
+    fetch_time = results[0].get("fetch_time", "") if results else now_cn().strftime("%Y-%m-%d %H:%M")
     data_date = results[0].get("latest_date", "") if results else ""
     if not data_date:
-        data_date = fetch_time[:10] if fetch_time else datetime.now().strftime("%Y-%m-%d")
+        data_date = fetch_time[:10] if fetch_time else now_cn().strftime("%Y-%m-%d")
 
     # ── 第一行：方案名 + 数据日期 ──
     draw.text((BORDER, 25), f"科红方案 · 数据日期 {data_date}", fill=CAPTION_COLOR, font=font_title)
@@ -2957,6 +2973,39 @@ def push_to_feishu(image_path: str, chat_id: str = None) -> bool:
         return False
 
 
+def push_text_to_feishu(text: str, chat_id: str = None) -> bool:
+    """发送纯文本消息（手机上比图片好读，作为每日报告主通道）。"""
+    if chat_id is None:
+        chat_id = FEISHU_CHAT_ID
+    if not FEISHU_APP_SECRET:
+        print("  [飞书推送] 跳过: 未配置 FEISHU_APP_SECRET")
+        return False
+    try:
+        resp = requests.post(
+            "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+            json={"app_id": FEISHU_APP_ID, "app_secret": FEISHU_APP_SECRET}, timeout=15)
+        resp.raise_for_status()
+        td = resp.json()
+        if td.get("code") != 0:
+            print(f"  [飞书文本] 获取 token 失败: {td}")
+            return False
+        r = requests.post(
+            "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+            headers={"Authorization": f"Bearer {td['tenant_access_token']}"},
+            json={"receive_id": chat_id, "msg_type": "text",
+                  "content": json.dumps({"text": text}, ensure_ascii=False)}, timeout=15)
+        r.raise_for_status()
+        rd = r.json()
+        if rd.get("code") != 0:
+            print(f"  [飞书文本] 发送失败: {rd}")
+            return False
+        print(f"  [飞书文本] 发送成功 message_id: {rd.get('data', {}).get('message_id', '?')}")
+        return True
+    except Exception as e:
+        print(f"  [飞书文本] 异常: {e}")
+        return False
+
+
 # ─── 入口 ──────────────────────────────────────────────
 
 def main():
@@ -3002,7 +3051,7 @@ def main():
         combined = None
     profit_map = combined.get("growth_entry_profit") if combined else None
 
-    date_str = datetime.now().strftime("%Y%m%d")
+    date_str = now_cn().strftime("%Y%m%d")
 
     # 一次性准备回测数据 (供长期趋势图紫色净值线 + 逐笔图年度柱 + 年度表)
     prep = prepare_backtest_data()
@@ -3122,41 +3171,63 @@ def main():
                        annual_returns=annual_dict, combined=combined,
                        basket_info=basket_info, freshness=freshness)
 
-    # 写入合并摘要
-    summary = "\n\n".join(all_briefs)
-    summary += f"\n\n📊 合并大图: {composed_path}"
+    # 写入合并摘要（v2：结论优先，一屏可读；失败回退旧版）
+    summary, v2_ok = None, False
+    try:
+        from daily_report_v2 import render_daily_report, render_appendix
+        if all_results:
+            _res0 = all_results[0]
+            summary = render_daily_report(_res0, combined, basket_info, freshness,
+                                          scheme="科红")
+            _app = render_appendix(_res0)
+            if _app:
+                summary += "\n\n" + _app
+            v2_ok = True
+    except Exception as _e:  # noqa: BLE001
+        print(f"  [v2报告] 生成失败，降级为旧版简报: {_e}")
+
+    # 数据校验留痕（无论哪版都写）
     if freshness:
         import json as _json
         (CACHE_DIR / f"data_freshness_{date_str}.json").write_text(
             _json.dumps(freshness, ensure_ascii=False, indent=2), encoding="utf-8")
-        _ov = freshness["overall"]
-        _t3 = freshness["top3"]
-        _line = (f"\n\n【数据准确性校验】总评={_ov} | TOP3:{_t3['state']}"
-                 f"(中证{_t3.get('live_date','?')}) | 指数:{freshness['index']['state']}"
-                 f" | 个股:{freshness['basket']['state']}"
-                 f" | 期望最新交易日={freshness['expected_trading_day']}")
-        if _ov != "OK":
-            _line += "\n⚠ " + " | ".join(freshness["messages"])
-        summary += _line
-    # 仓位控制摘要(每期报告前置)
-    if combined:
-        _cp = combined.get("current_position")
-        if _cp:
-            if not _cp.get("in_growth"):
-                _ptxt = "空仓（红利期, 持币无仓位）"
-            elif _cp.get("weight", 1.0) < 1.0:
-                _ptxt = f"半仓（{_cp['reason']}）"
-            else:
-                _ptxt = f"全仓（{_cp['reason']}）"
-            summary += f"\n\n【仓位控制】当前建议: {_ptxt}"
+
+    if not v2_ok:
+        summary = "\n\n".join(all_briefs)
+        summary += f"\n\n📊 合并大图: {composed_path}"
+        if freshness:
+            _ov = freshness["overall"]
+            _t3 = freshness["top3"]
+            _line = (f"\n\n【数据准确性校验】总评={_ov} | TOP3:{_t3['state']}"
+                     f"(国证{_t3.get('live_date','?')}) | 指数:{freshness['index']['state']}"
+                     f" | 个股:{freshness['basket']['state']}"
+                     f" | 期望最新交易日={freshness['expected_trading_day']}")
+            if _ov != "OK":
+                _line += "\n⚠ " + " | ".join(freshness["messages"])
+            summary += _line
+        if combined:
+            _cp = combined.get("current_position")
+            if _cp:
+                if not _cp.get("in_growth"):
+                    _ptxt = "空仓（红利期, 持币无仓位）"
+                elif _cp.get("weight", 1.0) < 1.0:
+                    _ptxt = f"半仓（{_cp['reason']}）"
+                else:
+                    _ptxt = f"全仓（{_cp['reason']}）"
+                summary += f"\n\n【仓位控制】当前建议: {_ptxt}"
+
     (CACHE_DIR / "latest_summary.txt").write_text(summary, encoding="utf-8")
     print("\n\n" + summary)
 
-    # ── 推送到飞书 ──
-    if composed_path and os.path.exists(composed_path):
-        print("\n" + "=" * 50)
-        print("推送合成大图到飞书...")
-        push_to_feishu(composed_path)
+    # ── 推送到飞书：文本为主（手机一屏），趋势图各一张 ──
+    print("\n" + "=" * 50)
+    print("推送日报到飞书...")
+    if summary:
+        push_text_to_feishu(summary)
+    if all_results:
+        for _ctype, _cpath in (all_results[0].get("chart_paths") or []):
+            if os.path.exists(_cpath):
+                push_to_feishu(_cpath)
 
     return all_results, summary, composed_path
 

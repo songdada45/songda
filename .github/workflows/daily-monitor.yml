@@ -8,11 +8,23 @@ on:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: 缓存行情数据（避免每天全量重抓）
+        uses: actions/cache@v4
+        with:
+          path: |
+            .growth_dividend_cache
+            .kechuang50_cache
+          key: market-cache-${{ github.run_id }}
+          restore-keys: |
+            market-cache-
+
       - name: 安装中文字体
         run: |
           sudo apt-get update -qq
