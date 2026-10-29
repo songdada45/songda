@@ -3259,15 +3259,15 @@ def main():
     (CACHE_DIR / "latest_summary.txt").write_text(summary, encoding="utf-8")
     print("\n\n" + summary)
 
-    # ── 推送到飞书：文本为主（手机一屏），趋势图各一张 ──
-    print("\n" + "=" * 50)
-    print("推送日报到飞书...")
-    if summary:
-        push_text_to_feishu(summary)
-    if all_results:
-        for _ctype, _cpath in (all_results[0].get("chart_paths") or []):
-            if os.path.exists(_cpath):
-                push_to_feishu(_cpath)
+    # ── 只落盘，不推送：由 send_daily_digest.py 统一合并成一条消息 ──
+    try:
+        _dg = Path.cwd() / ".daily_digest"
+        _dg.mkdir(exist_ok=True)
+        _part = _dg / "01_创红.txt"
+        _part.write_text(summary or "", encoding="utf-8")
+        print(f"\n[日报] 已写入 {_part}（由 send_daily_digest.py 统一推送）")
+    except Exception as _e:  # noqa: BLE001
+        print(f"  [日报] 写入失败: {_e}")
 
     return all_results, summary, composed_path
 

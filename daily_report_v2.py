@@ -89,7 +89,9 @@ def render_daily_report(result, combined=None, basket_info=None, freshness=None,
     _f = freshness or {}
     _idx = (_f.get("index") or {}).get("state", "?")
     _bk = (_f.get("basket") or {}).get("state", "?")
-    _data_bad = bool(_f) and (_f.get("overall") != "OK" or _idx != "OK" or _bk not in ("OK", "?"))
+    # 只有「指数行情坏了」或「数据过期」才阻断信号；
+    # 名单不一致(SCHEDULE 待更新)只告警，因为信号本身只依赖指数比值。
+    _data_bad = bool(_f) and (_idx != "OK" or _f.get("overall") == "STALE")
     _stale_days = None
     try:
         if date:
@@ -135,7 +137,7 @@ def render_daily_report(result, combined=None, basket_info=None, freshness=None,
         if _idx != "OK":
             _why.append(f"指数 {_idx}")
         if _bk not in ("OK", "?"):
-            _why.append(f"个股 {_bk}")
+            _why.append(f"个股 {_bk}（仅影响篮子报价）")
         lines.append("⛔ 数据异常：今日不生成交易信号")
         lines.append("   " + ("；".join(_why) if _why else "数据校验未通过"))
         lines.append("   请勿据此操作。排查：看 Actions 日志里行情接口是否返回 501/超时。")

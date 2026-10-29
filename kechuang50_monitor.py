@@ -133,7 +133,8 @@ BASKET_INDEX = {"code": "000688", "market": "sh"}   # 科创50 (基准/调仓来
 
 # 13 只曾进入 TOP3 的个股 (覆盖 2014-06 ~ 2026-06 全部 21 期)
 DELISTED_BASKET = set()   # 已退市篮子股(用qfq + 末日后置0); 科创50 TOP3 当前无退市
-STOCK_CODES = ["688111", "688012", "688009", "688981", "688599", "688256", "688041"]
+STOCK_CODES = ["688111", "688012", "688009", "688981", "688599", "688256", "688041",
+                "688008"]
 
 # ─── TOP3 篮子换仓时间口径 (2026-08-13 按用户要求订正) ───
 # 中证样本股调整方案通常在实施前约2周(约10个交易日)公布 (招募说明书明载:
@@ -193,7 +194,7 @@ EFFECTIVE_BY_EXEC = {_shift_trading(eff, -ANNOUNCE_GAP + EXEC_DELAY): eff
 # 个股简称 (报告文字用)
 STOCK_NAMES = {"688111": "金山办公", "688012": "中微公司", "688009": "中国通号",
                "688981": "中芯国际", "688599": "天合光能", "688256": "寒武纪",
-               "688041": "海光信息"}
+               "688041": "海光信息", "688008": "澜起科技"}
 
 # 中证科创50 调仓规则: 每年3/6/9/12月第二个星期五的下一交易日生效 (季度审议+快速纳入)
 CSINDEX_CLOSEWEIGHT_URL = "https://oss-ch.csindex.com.cn/static/html/csindex/public/uploads/file/autofile/closeweight/000688closeweight.xls"
@@ -3253,15 +3254,15 @@ def main():
     (CACHE_DIR / "latest_summary.txt").write_text(summary, encoding="utf-8")
     print("\n\n" + summary)
 
-    # ── 推送到飞书：文本为主（手机一屏），趋势图各一张 ──
-    print("\n" + "=" * 50)
-    print("推送日报到飞书...")
-    if summary:
-        push_text_to_feishu(summary)
-    if all_results:
-        for _ctype, _cpath in (all_results[0].get("chart_paths") or []):
-            if os.path.exists(_cpath):
-                push_to_feishu(_cpath)
+    # ── 只落盘，不推送：由 send_daily_digest.py 统一合并成一条消息 ──
+    try:
+        _dg = Path.cwd() / ".daily_digest"
+        _dg.mkdir(exist_ok=True)
+        _part = _dg / "02_科红.txt"
+        _part.write_text(summary or "", encoding="utf-8")
+        print(f"\n[日报] 已写入 {_part}（由 send_daily_digest.py 统一推送）")
+    except Exception as _e:  # noqa: BLE001
+        print(f"  [日报] 写入失败: {_e}")
 
     return all_results, summary, composed_path
 
