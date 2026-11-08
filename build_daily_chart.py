@@ -99,6 +99,9 @@ def collect(mod, scheme, growth_index_key="growth_cyb"):
 
 def verdict(d):
     rows = d["rows"]
+    if not rows:
+        return dict(last=None, in_growth=False, weight=0, pos={},
+                    buy_trigger=0, need_up=0, sell_trigger=0, hold_days=0)
     last = rows[-1]
     in_growth = d["combined"] and (d["combined"].get("current_position") or {}).get("in_growth")
     pos = (d["combined"] or {}).get("current_position") or {}
@@ -131,6 +134,12 @@ def draw_panel(fig, gs, d, v, title):
     ax.grid(True, color=C_GRID, lw=0.5, alpha=0.45)
 
     rows = d["rows"]
+    if not rows:
+        ax.text(0.5, 0.5, "本方案今日无数据", color=C_DIM, fontsize=14,
+                ha="center", va="center", transform=ax.transAxes)
+        ax.set_xticks([]); ax.set_yticks([])
+        ax.set_title(title, color=C_TXT, fontsize=13, loc="left", pad=8, fontweight="bold")
+        return
     x = np.arange(len(rows))
     r = np.array([q["ratio"] for q in rows])
     ma = np.array([q["ma"] for q in rows])
@@ -259,9 +268,15 @@ def build(d1, d2, now=None):
     axh = fig.add_subplot(gs[0, 0]); axh.axis("off")
     axh.text(0, 0.72, "大周期轮动 · 每日一图", color=C_TXT, fontsize=22,
              fontweight="bold", transform=axh.transAxes)
-    both_out = all(not verdict(d)["in_growth"] for d in (d1, d2))
+    empty = any(not d.get("rows") for d in (d1, d2))
+    stale = any(d.get("stale") for d in (d1, d2))
+    both_out = all(not verdict(d)["in_growth"] for d in (d1, d2)) and not empty
     both_in = all(verdict(d)["in_growth"] for d in (d1, d2))
-    if both_out:
+    if empty:
+        headline, hcol = "注意：有一路数据未更新，见下方标注", C_ORANGE
+    elif stale:
+        headline, hcol = "注意：数据未更新到最新交易日，仅供参考", C_ORANGE
+    elif both_out:
         headline, hcol = "今天：两套方案都空仓，不用操作", C_RED
     elif both_in:
         headline, hcol = "今天：两套方案都持仓，继续持有", C_GREEN
@@ -277,7 +292,7 @@ def build(d1, d2, now=None):
     for i, (d, scheme_key) in enumerate([(d1, "①"), (d2, "②")]):
         v = verdict(d)
         title = (f"{scheme_key} {d['scheme']} · {d['growth_name']} vs {d['div_name']}"
-                 + ("    ⚠️ 数据异常" if d.get("data_bad") else ""))
+                 + ("    [数据异常]" if d.get("data_bad") else ""))
         draw_panel(fig, gs[1 + i], d, v, title)
 
     # footer
@@ -359,6 +374,7 @@ def load_json(name):
                 "next_rebalance": (d.get("basket") or {}).get("next"),
                 "days_left": (d.get("basket") or {}).get("days")},
         data_bad=False,
+        stale=(d.get("stale") or False),
     )
 
 

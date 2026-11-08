@@ -49,6 +49,8 @@ INDICES = {
     "dividend":    {"name": "中证红利", "code": "000922", "market": "sh"},
 }
 
+GROWTH_KEY = "growth_cyb"
+
 MA_WINDOW = 20          # 均线窗口
 MA_BAND = 0.01          # 缓冲区带宽 1% (原研究最优参数)
 DATA_DAYS = 2000        # 约8年交易日(腾讯API上限)，支持长期收益对比
@@ -420,8 +422,20 @@ def get_index_data(index_info: dict) -> list[dict] | None:
             print(f"  [{name}] 异常: {e}")
         time.sleep(0.5)
 
+    # 最终兜底：本地长 CSV（仓库自带，截至 2026-07-29），取"更新的那个"
+    def _last_date(recs):
+        return max((r.get("date") or "" for r in recs), default="")
+
+    csv_data = load_long_csv_data() or {}
+    csv_recs = csv_data.get(code) or []
+    if csv_recs:
+        if cached and _last_date(cached) >= _last_date(csv_recs):
+            print(f"  使用过期缓存（截至 {_last_date(cached)}）")
+            return cached
+        print(f"  使用本地 long_data（{len(csv_recs)} 根K线，截至 {_last_date(csv_recs)}）")
+        return csv_recs
     if cached:
-        print(f"  使用过期缓存")
+        print(f"  使用过期缓存（截至 {_last_date(cached)}）")
         return cached
     return None
 
@@ -3059,11 +3073,22 @@ def push_text_to_feishu(text: str, chat_id: str = None) -> bool:
 def write_chart_json(path, scheme, result, combined, prep, basket_info, days=260):
     """把出图所需数据落成 JSON，供 build_daily_chart.py 离线绘制（不再联网）。"""
     try:
-        if not result or "error" in result or not prep:
+        if not result or "error" in result:
             return
+        prep = prep or {}
         dates = prep.get("cyb_div_dates") or []
         gm = prep.get("cyb_map") or {}
         dm = prep.get("div_map") or {}
+        if not dates:
+            # prep 缺失时直接从指数数据构建
+            _gi = get_index_data(INDICES[GROWTH_KEY])
+            _di = get_index_data(INDICES["dividend"])
+            if not _gi or not _di:
+                print("  [图表数据] 指数数据不足，跳过")
+                return
+            dates, _g, _d = align_data(_gi, _di)
+            gm = dict(zip(dates, _g))
+            dm = dict(zip(dates, _d))
         if not dates:
             return
         ratio = [gm[d] / dm[d] for d in dates]
@@ -3118,6 +3143,8 @@ def write_chart_json(path, scheme, result, combined, prep, basket_info, days=260
                          "runup": pos.get("runup"),
                          "hold_days": hold_days},
             "basket": {"names": names, "next": nxt, "days": ndays},
+            "stale": (datetime.strptime(rows[-1]["date"], "%Y-%m-%d").date()
+                      < now_cn().date() - timedelta(days=2)),
             "perf": {"ann": (combined or {}).get("ann_ret"),
                      "mdd": (combined or {}).get("max_dd"),
                      "ytd": ytd, "dd_now": dd_now},
