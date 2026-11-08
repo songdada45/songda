@@ -354,12 +354,12 @@ def load_long_csv_data() -> dict[str, list[dict]] | None:
     返回: {code: [{"date":..., "close":...}, ...]} 或 None
     """
     csv_dir = Path(__file__).parent / "long_data"
-    codes = ["399006", "000922"]
+    codes = ["399006", "000922", "000688"]
     result = {}
     for code in codes:
         csv_path = csv_dir / f"{code}.csv"
         if not csv_path.exists():
-            return None
+            continue
         try:
             with open(csv_path, "r", encoding="utf-8-sig") as f:
                 reader = csv.reader(f)
@@ -392,7 +392,15 @@ def get_index_data(index_info: dict) -> list[dict] | None:
     cached_full = load_cache(code)
     if cached_full:
         cached = cached_full.get("records", [])
-        if len(cached) >= 15:
+        if cached:
+            _ld = max((r.get("date") or "" for r in cached), default="")
+            try:
+                if (now_cn().date() - datetime.strptime(_ld, "%Y-%m-%d").date()).days > 400:
+                    print(f"  [缓存] {code} 最后数据 {_ld} 超过 400 天，判定损坏，忽略")
+                    cached_full, cached = None, []
+            except Exception:
+                pass
+        if cached and len(cached) >= 15:
             latest_date = max(r["date"] for r in cached)
             today_str = now_cn().strftime("%Y-%m-%d")
             if latest_date >= today_str and _cache_finalized_today(

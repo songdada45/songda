@@ -62,6 +62,7 @@ jobs:
         with:
           name: daily-digest-${{ github.run_id }}
           path: .daily_digest/*
+          include-hidden-files: true
           retention-days: 14
 
       - name: 存档图表(创业版)
