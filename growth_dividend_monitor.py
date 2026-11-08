@@ -3045,6 +3045,80 @@ def push_text_to_feishu(text: str, chat_id: str = None) -> bool:
         print(f"  [飞书文本] 异常: {e}")
         return False
 
+def write_chart_json(path, scheme, result, combined, prep, basket_info, days=260):
+    """把出图所需数据落成 JSON，供 build_daily_chart.py 离线绘制（不再联网）。"""
+    try:
+        if not result or "error" in result or not prep:
+            return
+        dates = prep.get("cyb_div_dates") or []
+        gm = prep.get("cyb_map") or {}
+        dm = prep.get("div_map") or {}
+        if not dates:
+            return
+        ratio = [gm[d] / dm[d] for d in dates]
+        ma = calc_ma(ratio, MA_WINDOW)
+        sig = calc_ma_band_signal(ratio, ma, MA_BAND)
+        k = len(ratio) - len(sig)
+        rows = []
+        for j, s in enumerate(sig):
+            i = k + j
+            rows.append({"date": dates[i], "ratio": round(ratio[i], 6),
+                         "ma": round(ma[i], 6), "upper": round(s["upper"], 6),
+                         "lower": round(s["lower"], 6), "state": s["state"],
+                         "growth": round(gm[dates[i]], 4), "div": round(dm[dates[i]], 4)})
+        rows = rows[-days:]
+
+        pos = (combined or {}).get("current_position") or {}
+        positions = (combined or {}).get("positions") or []
+        hold_days = 0
+        for p in reversed(positions):
+            if p == 1:
+                hold_days += 1
+            else:
+                break
+        annual = dict((combined or {}).get("combined_annual") or [])
+        ytd = annual.get(int(rows[-1]["date"][:4])) if rows else None
+        nav = (combined or {}).get("nav") or []
+        dd_now = None
+        if nav:
+            peak = max(nav)
+            dd_now = nav[-1] / peak - 1
+
+        names = []
+        nxt, ndays = None, None
+        if basket_info:
+            names = [t.get("name") for t in basket_info.get("top3", [])]
+            nxt = basket_info.get("next_rebalance")
+            ndays = basket_info.get("days_left")
+
+        data = {
+            "scheme": scheme,
+            "date": rows[-1]["date"],
+            "growth_name": result.get("index_pair", "成长").split(" vs ")[0],
+            "div_name": result.get("index_pair", " vs 红利").split(" vs ")[-1],
+            "signal": result.get("current_signal"),
+            "ratio": rows[-1]["ratio"], "ma": rows[-1]["ma"],
+            "upper": rows[-1]["upper"], "lower": rows[-1]["lower"],
+            "growth": rows[-1]["growth"], "dividend": rows[-1]["div"],
+            "rows": rows,
+            "position": {"in_growth": bool(pos.get("in_growth")),
+                         "weight": pos.get("weight"),
+                         "entry_date": pos.get("entry_date"),
+                         "runup": pos.get("runup"),
+                         "hold_days": hold_days},
+            "basket": {"names": names, "next": nxt, "days": ndays},
+            "perf": {"ann": (combined or {}).get("ann_ret"),
+                     "mdd": (combined or {}).get("max_dd"),
+                     "ytd": ytd, "dd_now": dd_now},
+        }
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        print(f"  [图表数据] 已写入 {p}（{len(rows)} 根K线）")
+    except Exception as e:  # noqa: BLE001
+        print(f"  [图表数据] 写入失败: {e}")
+
+
 
 # ─── 入口 ──────────────────────────────────────────────
 
@@ -3259,15 +3333,22 @@ def main():
     (CACHE_DIR / "latest_summary.txt").write_text(summary, encoding="utf-8")
     print("\n\n" + summary)
 
-    # ── 只落盘，不推送：由 send_daily_digest.py 统一合并成一条消息 ──
+    # ── 只落盘，不推送：由 send_daily_digest.py / build_daily_chart.py 统一处理 ──
     try:
         _dg = Path.cwd() / ".daily_digest"
         _dg.mkdir(exist_ok=True)
-        _part = _dg / "01_创红.txt"
-        _part.write_text(summary or "", encoding="utf-8")
-        print(f"\n[日报] 已写入 {_part}（由 send_daily_digest.py 统一推送）")
+        (_dg / "01_创红.txt").write_text(summary or "", encoding="utf-8")
+        print(f"\n[日报] 已写入 {_dg / '01_创红.txt'}")
     except Exception as _e:  # noqa: BLE001
         print(f"  [日报] 写入失败: {_e}")
+
+    # 供「每日一图」使用的离线数据（不联网）
+    try:
+        write_chart_json(_dg / "01_创红.json", "创红",
+                         all_results[0] if all_results else None,
+                         combined, prep, basket_info)
+    except Exception as _e:  # noqa: BLE001
+        print(f"  [图表数据] 异常: {_e}")
 
     return all_results, summary, composed_path
 

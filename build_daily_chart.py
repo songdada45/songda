@@ -343,28 +343,58 @@ def feishu_send_post(png_path, title, lines):
         return False
 
 
-def main():
-    import growth_dividend_monitor as GM
-    import kechuang50_monitor as KM
+def load_json(name):
+    p = OUT_DIR / name
+    if not p.exists():
+        return None
+    d = json.loads(p.read_text(encoding="utf-8"))
+    # 适配绘图函数需要的结构
+    return dict(
+        scheme=d["scheme"], rows=d["rows"], growth_name=d["growth_name"],
+        div_name=d["div_name"], band=0.01, window=20,
+        combined={"current_position": d["position"],
+                  "ann_ret": (d.get("perf") or {}).get("ann"),
+                  "max_dd": (d.get("perf") or {}).get("mdd")},
+        basket={"top3": [{"name": n} for n in (d.get("basket") or {}).get("names", [])],
+                "next_rebalance": (d.get("basket") or {}).get("next"),
+                "days_left": (d.get("basket") or {}).get("days")},
+        data_bad=False,
+    )
 
-    d1 = collect(GM, "创红")
-    d2 = collect(KM, "科红")
+
+def main():
+    d1 = load_json("01_创红.json")
+    d2 = load_json("02_科红.json")
+    if not d1 and not d2:
+        print("[chart] 没有可用的绘图数据（两个 JSON 都缺失），退出由文字日报兜底")
+        return 1
+    # 缺一个时用占位，保证单方案也能出图
+    for i, d in enumerate((d1, d2)):
+        if d is None:
+            d = dict(scheme="—", rows=[], growth_name="—", div_name="—", band=0.01,
+                     window=20, combined=None, basket=None, data_bad=True)
+            if i == 0:
+                d1 = d
+            else:
+                d2 = d
 
     png = build(d1, d2)
 
-    # 图外只配 3 行字
     v1, v2 = verdict(d1), verdict(d2)
-
+    d1["perf"] = d1.get("perf")
     def short(d, v):
+        if not d["rows"]:
+            return f"{d['scheme']} 今日无数据"
         if v["in_growth"]:
             return f"{d['scheme']} 满仓中，跌破 {v['sell_trigger']:,.0f} 卖出"
-        return f"{d['scheme']} 空仓，涨到 {v['buy_trigger']:,.0f} 买入（还差 {v['need_up']*100:+.1f}%）"
+        return (f"{d['scheme']} 空仓，涨到 {v['buy_trigger']:,.0f} 买入"
+                f"（还差 {v['need_up']*100:+.1f}%）")
 
     lines = [short(d1, v1), short(d2, v2), "详见上图"]
     title = f"每日一图 {datetime.date.today():%m-%d}"
     ok = feishu_send_post(str(png), title, lines)
     (OUT_DIR / "caption.txt").write_text(title + "\n" + "\n".join(lines), encoding="utf-8")
-    return 0 if ok or not os.environ.get("FEISHU_APP_SECRET") else 1
+    return 0 if (ok or not os.environ.get("FEISHU_APP_SECRET")) else 1
 
 
 if __name__ == "__main__":
