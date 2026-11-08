@@ -207,6 +207,8 @@ CSINDEX_CLOSEWEIGHT_URL = "https://oss-ch.csindex.com.cn/static/html/csindex/pub
 
 # ─── 行情请求：重试 + 退避 + 限速（CI 上腾讯会对高频请求返回 501） ───
 _LAST_REQ_TS = [0.0]
+_FAIL_STREAK = 0
+_CIRCUIT_UNTIL = 0.0
 
 
 def _throttle(min_interval: float = 0.35):
