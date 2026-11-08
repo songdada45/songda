@@ -47,20 +47,21 @@ jobs:
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
         run: python kechuang50_monitor.py
-      - name: 合并并推送「每日一条」日报
+      - name: 生成「每日一图」并推送（失败回退文字日报）
         if: always()
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
-        run: python send_daily_digest.py
+        run: |
+          python build_daily_chart.py || python send_daily_digest.py
 
       - name: 存档文字日报
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: daily-digest-${{ github.run_id }}
-          path: .daily_digest/*.txt
+          path: .daily_digest/*
           retention-days: 14
 
       - name: 存档图表(创业版)
