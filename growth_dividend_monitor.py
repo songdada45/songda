@@ -213,9 +213,13 @@ def _throttle(min_interval: float = 0.35):
     _LAST_REQ_TS[0] = _t.time()
 
 
-def http_get_json(url: str, params: dict, timeout: int = 20, retries: int = 6, tag: str = ""):
-    """带重试的 GET JSON。对 429/5xx 做指数退避（1.5s, 3s, 6s）。"""
+def http_get_json(url: str, params: dict, timeout: int = 20, retries: int = 3, tag: str = ""):
+    """带重试的 GET JSON。连续失败会触发熔断：后续请求直接放弃，快速降级用缓存。"""
     import time as _t
+    global _FAIL_STREAK, _CIRCUIT_UNTIL
+    now = _t.time()
+    if now < _CIRCUIT_UNTIL:
+        return None
     last = None
     for attempt in range(retries):
         _throttle()
@@ -223,14 +227,21 @@ def http_get_json(url: str, params: dict, timeout: int = 20, retries: int = 6, t
             resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
             if resp.status_code in (429, 500, 501, 502, 503, 504):
                 last = f"HTTP {resp.status_code}"
-                _t.sleep(min(2.0 * (2 ** attempt), 30.0))
+                _FAIL_STREAK += 1
+                if _FAIL_STREAK >= 5:          # 连续 5 次失败 → 熔断 120 秒
+                    _CIRCUIT_UNTIL = _t.time() + 120
+                    print(f"  [行情] 连续失败 {_FAIL_STREAK} 次，熔断 120s，改用缓存数据")
+                    return None
+                _t.sleep(min(1.0 * (2 ** attempt), 8.0))
                 continue
             resp.raise_for_status()
+            _FAIL_STREAK = 0
             return resp.json()
         except Exception as e:  # noqa: BLE001
             last = f"{type(e).__name__}: {e}"
-            _t.sleep(0.8 * (attempt + 1))
-    print(f"  [行情] {tag or url} 重试 {retries} 次仍失败: {last}")
+            _t.sleep(0.5 * (attempt + 1))
+    _FAIL_STREAK += 1
+    print(f"  [行情] {tag or url} 失败: {last}")
     return None
 
 
