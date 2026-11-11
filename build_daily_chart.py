@@ -223,17 +223,17 @@ def draw_panel(fig, gs, d, v, title):
     # 关键数字
     if not ok:
         ax2.text(0.06, 0.56, "距买入还差", color=C_DIM, fontsize=10)
-        ax2.text(0.06, 0.475, f"{v['need_up']*100:+.1f}%", color=C_GREEN,
+        ax2.text(0.06, 0.475, f"{abs(v['need_up'])*100:.1f}%", color=C_GREEN,
                  fontsize=30, fontweight="bold")
-        ax2.text(0.06, 0.405, f"触发 ≈ {d['growth_name']} {v['buy_trigger']:,.0f}"
+        ax2.text(0.06, 0.405, f"买点 {d['growth_name']} {v['buy_trigger']:,.0f}"
                               f"（今天 {v['last']['growth']:,.0f}）", color=C_TXT, fontsize=10)
     else:
         need_down = v["last"]["growth"] / v["sell_trigger"] - 1
         ax2.text(0.06, 0.56, "距卖出还差", color=C_DIM, fontsize=10)
-        ax2.text(0.06, 0.475, f"{need_down*100:+.1f}%", color=C_RED,
+        ax2.text(0.06, 0.475, f"{abs(need_down)*100:.1f}%", color=C_RED,
                  fontsize=30, fontweight="bold")
-        ax2.text(0.06, 0.405, f"触发 ≈ {d['growth_name']} {v['sell_trigger']:,.0f}",
-                 color=C_TXT, fontsize=10)
+        ax2.text(0.06, 0.405, f"卖点 {d['growth_name']} {v['sell_trigger']:,.0f}"
+                              f"（今天 {v['last']['growth']:,.0f}）", color=C_TXT, fontsize=10)
 
     # 底部信息
     yy = 0.29
@@ -286,8 +286,7 @@ def build(d1, d2, now=None):
              color=C_DIM, fontsize=10, transform=axh.transAxes)
     axh.text(0.42, 0.30, headline, color=hcol, fontsize=12, fontweight="bold",
              transform=axh.transAxes)
-    axh.text(0, 0.02, "绿底＝成长期（满仓），红底＝红利期（空仓）；左图为比值走势",
-             color=C_GRAY, fontsize=8, transform=axh.transAxes)
+
 
     for i, (d, scheme_key) in enumerate([(d1, "①"), (d2, "②")]):
         v = verdict(d)
@@ -297,11 +296,10 @@ def build(d1, d2, now=None):
 
     # footer
     axf = fig.add_subplot(gs[3, 0]); axf.axis("off")
-    axf.text(0, 0.62, f"更新 {now:%Y-%m-%d %H:%M}   ·   比值 = 成长指数 ÷ 红利指数；"
-                      f"比值上穿上轨→买入成长，下破下轨→清仓",
+    axf.text(0, 0.55, f"更新 {now:%Y-%m-%d %H:%M}   ·   绿底＝满仓期，红底＝空仓期",
              color=C_DIM, fontsize=9, transform=axf.transAxes)
-    axf.text(0, 0.12, "历史回测不代表未来；触发价为按当前均线估算，均线每天会变",
-             color=C_GRAY, fontsize=8, transform=axf.transAxes)
+    axf.text(0, 0.10, "比值上穿上轨＝买入，下破下轨＝清仓；买卖点按均线估算，每天会变",
+             color=C_GRAY, fontsize=8.5, transform=axf.transAxes)
 
     fig.savefig(PNG, facecolor=C_BG, dpi=100)
     plt.close(fig)
@@ -400,14 +398,25 @@ def main():
     d1["perf"] = d1.get("perf")
     def short(d, v):
         if not d["rows"]:
-            return f"{d['scheme']} 今日无数据"
+            return f"{d['scheme']}｜今日无数据"
         if v["in_growth"]:
-            return f"{d['scheme']} 满仓中，跌破 {v['sell_trigger']:,.0f} 卖出"
-        return (f"{d['scheme']} 空仓，涨到 {v['buy_trigger']:,.0f} 买入"
-                f"（还差 {v['need_up']*100:+.1f}%）")
+            return (f"{d['scheme']}｜满仓，{d['growth_name']} 跌到 "
+                    f"{v['sell_trigger']:,.0f} 就清仓"
+                    f"（现 {v['last']['growth']:,.0f}）")
+        return (f"{d['scheme']}｜{d['growth_name']} 涨到 "
+                f"{v['buy_trigger']:,.0f} 才买，还差 {abs(v['need_up'])*100:.1f}%"
+                f"（现 {v['last']['growth']:,.0f}）")
 
-    lines = [short(d1, v1), short(d2, v2), "详见上图"]
-    title = f"每日一图 {datetime.date.today():%m-%d}"
+    date_s = datetime.date.today().strftime("%m-%d")
+    if any(not d.get("rows") for d in (d1, d2)):
+        title = f"{date_s} · 有方案数据未更新，仅图供参考"
+    elif not v1["in_growth"] and not v2["in_growth"]:
+        title = f"{date_s} · 两套都空仓，今天不用操作"
+    elif v1["in_growth"] and v2["in_growth"]:
+        title = f"{date_s} · 两套都持仓，继续拿着"
+    else:
+        title = f"{date_s} · 一套持仓一套空仓，各自按条件执行"
+    lines = [short(d1, v1), short(d2, v2)]
     ok = feishu_send_post(str(png), title, lines)
     (OUT_DIR / "caption.txt").write_text(title + "\n" + "\n".join(lines), encoding="utf-8")
     return 0 if (ok or not os.environ.get("FEISHU_APP_SECRET")) else 1
