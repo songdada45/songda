@@ -2,12 +2,20 @@ name: 每日成长/红利风格轮动监控
 
 on:
   schedule:
-    - cron: "30 7 * * 1-5"
+    - cron: "30 7 * * 1-5"    # 北京 15:30 主跑
+    - cron: "30 8 * * 1-5"    # 北京 16:30 兜底（当日已发则跳过）
+    - cron: "30 9 * * 1-5"    # 北京 17:30 兜底
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只生成不发送（跳过飞书推送，用于验证）"
+        type: boolean
+        default: false
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       TZ: Asia/Shanghai
     steps:
@@ -44,7 +52,11 @@ jobs:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
-        run: python growth_dividend_monitor.py
+        run: |
+          for i in 1 2 3; do
+            python growth_dividend_monitor.py && break
+            echo "创红第 $i 次失败，60s 后重试"; sleep 60
+          done
       - name: 冷却 60s，避免同一出口 IP 连续请求被限流
         if: always()
         run: sleep 60
@@ -56,15 +68,31 @@ jobs:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
-        run: python kechuang50_monitor.py
+        run: |
+          for i in 1 2 3; do
+            python kechuang50_monitor.py && break
+            echo "科红第 $i 次失败，60s 后重试"; sleep 60
+          done
       - name: 生成「每日一图」并推送（失败回退文字日报）
-        if: always()
+        if: always() && github.event.inputs.dry_run != 'true'
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
         run: |
-          python build_daily_chart.py || python send_daily_digest.py || true
+          for i in 1 2 3; do
+            python build_daily_chart.py && break
+            echo "出图第 $i 次失败，改发文字版"
+            python send_daily_digest.py && break
+            sleep 30
+          done
+          true
+
+      - name: 试跑模式：只出图不发送
+        if: always() && github.event.inputs.dry_run == 'true'
+        env:
+          FEISHU_APP_SECRET: ""
+        run: python build_daily_chart.py || true
 
       - name: 存档文字日报
         if: always()

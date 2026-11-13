@@ -89,11 +89,60 @@ def compose(parts: dict) -> str:
     return "\n".join(L)
 
 
+def _feishu_token(app_id, app_secret):
+    import requests
+    r = requests.post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                      json={"app_id": app_id, "app_secret": app_secret}, timeout=15)
+    d = r.json()
+    return d.get("tenant_access_token") if d.get("code") == 0 else None
+
+
+def already_sent_today(chat_id, key_text, app_id, app_secret):
+    """当天是否已经发过同类消息（按标题关键字判断）。查不到就返回 False（宁可按未发处理）。"""
+    try:
+        import requests
+        at = _feishu_token(app_id, app_secret)
+        if not at:
+            return False
+        r = requests.get("https://open.feishu.cn/open-apis/im/v1/messages",
+                         headers={"Authorization": f"Bearer {at}"},
+                         params={"container_id_type": "chat", "container_id": chat_id,
+                                 "sort_type": "ByCreateTimeDesc", "page_size": 20},
+                         timeout=15)
+        d = r.json()
+        if d.get("code") != 0:
+            print(f"[幂等] 查询消息失败（按未发处理）: {d.get('msg')}")
+            return False
+        import datetime as _dt
+        _cn = _dt.timezone(_dt.timedelta(hours=8))
+        for it in d.get("data", {}).get("items", []):
+            body = it.get("body", {}).get("content", "")
+            if key_text not in body:
+                continue
+            # 只把「收盘后（15:05 之后）」发的那条算数，盘中临时推的不拦正式报告
+            try:
+                ts = int(it.get("create_time", "0")) / 1000
+                when = _dt.datetime.fromtimestamp(ts, _cn)
+            except Exception:
+                when = None
+            if when is None or (when.hour, when.minute) >= (15, 5):
+                print(f"[幂等] 今天收盘后已发过（{key_text} @ {when}），跳过")
+                return True
+            print(f"[幂等] 发现盘中那条（{when}），不算数，继续发送正式版")
+        return False
+    except Exception as e:  # noqa: BLE001
+        print(f"[幂等] 检查异常（按未发处理）: {e}")
+        return False
+
+
 def send_text(text: str) -> bool:
     if not APP_SECRET:
         print("[digest] 未配置 FEISHU_APP_SECRET，跳过发送")
         print(text[:500])
         return False
+    key = text.splitlines()[0][:20] if text else ""
+    if key and already_sent_today(CHAT_ID, key, APP_ID, APP_SECRET):
+        return True
     try:
         r = requests.post(
             "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
