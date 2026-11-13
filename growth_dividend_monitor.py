@@ -2855,7 +2855,10 @@ def compose_all_charts(chart_files: list[tuple[str, str]], save_path: str,
         _cp = combined.get("current_position") if combined else None
         _pos_suffix = ""
         if _cp and _cp.get("in_growth"):
-            _pos_suffix = f"（{_cp['pos_label']}·{_cp['zone']}）"
+            _w = _cp.get("weight", 1.0) or 1.0
+            _lab = _cp.get("pos_label") or ("半仓" if _w < 1.0 else "全仓")
+            _zone = _cp.get("zone") or ""
+            _pos_suffix = f"（{_lab}·{_zone}）" if _zone else f"（{_lab}）"
         hold_text = f"持有{names}{_pos_suffix}"
         _half = bool(_cp and _cp.get("weight", 1.0) < 1.0)
         hold_color = GOLD_COLOR if _half else BLUE_COLOR

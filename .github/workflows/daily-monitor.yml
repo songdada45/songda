@@ -25,12 +25,20 @@ jobs:
           restore-keys: |
             market-cache-
 
-      - name: 安装中文字体
+      - name: 安装中文字体（失败不阻断）
+        continue-on-error: true
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq fonts-noto-cjk
-      - run: pip install -r requirements.txt
+          set +e
+          for i in 1 2 3; do
+            sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk && break
+            echo "第 $i 次安装失败，5 秒后重试"; sleep 5
+          done
+          fc-list :lang=zh | head -3 || true
+      - name: 安装依赖（失败不阻断）
+        continue-on-error: true
+        run: pip install -r requirements.txt
       - name: 运行成长/红利风格轮动监控(创业版)
+        if: always()
         continue-on-error: true
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
@@ -38,9 +46,11 @@ jobs:
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
         run: python growth_dividend_monitor.py
       - name: 冷却 60s，避免同一出口 IP 连续请求被限流
+        if: always()
         run: sleep 60
 
       - name: 运行科创50/红利风格轮动监控(科创版)
+        if: always()
         continue-on-error: true
         env:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
@@ -54,7 +64,7 @@ jobs:
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
         run: |
-          python build_daily_chart.py || python send_daily_digest.py
+          python build_daily_chart.py || python send_daily_digest.py || true
 
       - name: 存档文字日报
         if: always()
