@@ -358,12 +358,14 @@ def should_send_now(data_date_str):
     """
     now = _bj_now()
     today = now.strftime("%Y-%m-%d")
+    if os.environ.get("FORCE_SEND") == "1":
+        return True, f"FORCE_SEND=1，强制推送（北京时间 {now:%H:%M}，数据日 {data_date_str}）"
     if (now.hour, now.minute) < (15, 5):
         return False, f"北京时间 {now:%H:%M} 尚未收盘（早于 15:05），数据日 {data_date_str}，跳过推送"
     return True, f"北京时间 {now:%H:%M}，数据日 {data_date_str}，正常推送"
 
 
-def feishu_send_post(png_path, title, lines):
+def feishu_send_post(png_path, title, lines, key_suffix="", data_date=""):
     import requests
     app_id = os.environ.get("FEISHU_APP_ID", "cli_aae07cacb1785bdb")
     app_secret = os.environ.get("FEISHU_APP_SECRET", "")
@@ -371,8 +373,8 @@ def feishu_send_post(png_path, title, lines):
     if not app_secret:
         print("[chart] 未配置 FEISHU_APP_SECRET，跳过发送")
         return False
-    _data_date = (d1.get("date") or str(datetime.date.today()))
-    key = f"每日一图 {_data_date[5:]}"
+    _data_date = data_date or str(datetime.date.today())
+    key = f"每日一图 {_data_date[5:]}{key_suffix}"
     if already_sent_today(chat_id, key,
                           os.environ.get("FEISHU_APP_ID", "cli_aae07cacb1785bdb"),
                           os.environ.get("FEISHU_APP_SECRET", "")):
@@ -480,13 +482,18 @@ def main():
         title = f"{date_s} · 一套持仓一套空仓，各自按条件执行"
     lines = [short(d1, v1), short(d2, v2)]
     _dd = (d1.get("date") if d1.get("rows") else (d2.get("date") if d2.get("rows") else ""))
+    _now = _bj_now()
+    _intraday = (_now.hour, _now.minute) < (15, 5) and _now.weekday() < 5
     _go, _why = should_send_now(_dd)
     print(f"[窗口] {_why}")
     if not _go:
         (OUT_DIR / "caption.txt").write_text(title + "\n" + "\n".join(lines) +
                                              "\n\n（本次未推送：不在收盘后窗口）", encoding="utf-8")
         return 0
-    ok = feishu_send_post(str(png), title, lines)
+    if _intraday:
+        title = title + "（盘中快照）"
+    ok = feishu_send_post(str(png), title, lines,
+                          key_suffix=" 盘中" if _intraday else "", data_date=_dd)
     (OUT_DIR / "caption.txt").write_text(title + "\n" + "\n".join(lines), encoding="utf-8")
     return 0 if (ok or not os.environ.get("FEISHU_APP_SECRET")) else 1
 

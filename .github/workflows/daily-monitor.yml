@@ -15,6 +15,10 @@ on:
         description: "只生成不发送（跳过飞书推送，用于验证）"
         type: boolean
         default: false
+      force:
+        description: "强制发送（忽略收盘时间窗口，盘中也发）"
+        type: boolean
+        default: false
 
 jobs:
   monitor:
@@ -83,6 +87,7 @@ jobs:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          FORCE_SEND: ${{ github.event.inputs.force == 'true' && '1' || '0' }}
         run: |
           for i in 1 2 3; do
             python build_daily_chart.py && break
