@@ -427,7 +427,8 @@ def load_json(name):
     d = json.loads(p.read_text(encoding="utf-8"))
     # 适配绘图函数需要的结构
     return dict(
-        scheme=d["scheme"], rows=d["rows"], growth_name=d["growth_name"],
+        scheme=d["scheme"], date=d.get("date"), rows=d["rows"],
+        growth_name=d["growth_name"],
         div_name=d["div_name"], band=0.01, window=20,
         combined={"current_position": d["position"],
                   "ann_ret": (d.get("perf") or {}).get("ann"),
