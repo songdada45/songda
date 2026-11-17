@@ -217,12 +217,13 @@ def _throttle(min_interval: float = 0.35):
     _LAST_REQ_TS[0] = _t.time()
 
 
-def http_get_json(url: str, params: dict, timeout: int = 20, retries: int = 3, tag: str = ""):
+def http_get_json(url: str, params: dict, timeout: int = 20, retries: int = 3,
+                  tag: str = "", critical: bool = False):
     """带重试的 GET JSON。连续失败会触发熔断：后续请求直接放弃，快速降级用缓存。"""
     import time as _t
     global _FAIL_STREAK, _CIRCUIT_UNTIL
     now = _t.time()
-    if now < _CIRCUIT_UNTIL:
+    if now < _CIRCUIT_UNTIL and not critical:
         return None
     last = None
     for attempt in range(retries):
@@ -254,7 +255,7 @@ def fetch_tencent_kline(market: str, code: str, days: int, adj: str = "qfq") -> 
     url = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
     params = {"param": f"{market}{code},day,,,{days},{adj}"}
     try:
-        data = http_get_json(url, params, tag=f"腾讯 {market}{code}")
+        data = http_get_json(url, params, tag=f"腾讯 {market}{code}", critical=True)
         if not data:
             return None
         klines = data.get("data", {}).get(f"{market}{code}", {}).get("qfqday", []) or \

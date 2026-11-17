@@ -318,6 +318,9 @@ def _feishu_token(app_id, app_secret):
 
 def already_sent_today(chat_id, key_text, app_id, app_secret):
     """当天是否已经发过同类消息（按标题关键字判断）。查不到就返回 False（宁可按未发处理）。"""
+    if os.environ.get("FORCE_SEND") == "1":
+        print("[幂等] FORCE_SEND=1，强制发送")
+        return False
     try:
         import requests
         at = _feishu_token(app_id, app_secret)
@@ -332,22 +335,11 @@ def already_sent_today(chat_id, key_text, app_id, app_secret):
         if d.get("code") != 0:
             print(f"[幂等] 查询消息失败（按未发处理）: {d.get('msg')}")
             return False
-        import datetime as _dt
-        _cn = _dt.timezone(_dt.timedelta(hours=8))
         for it in d.get("data", {}).get("items", []):
             body = it.get("body", {}).get("content", "")
-            if key_text not in body:
-                continue
-            # 只把「收盘后（15:05 之后）」发的那条算数，盘中临时推的不拦正式报告
-            try:
-                ts = int(it.get("create_time", "0")) / 1000
-                when = _dt.datetime.fromtimestamp(ts, _cn)
-            except Exception:
-                when = None
-            if when is None or (when.hour, when.minute) >= (15, 5):
-                print(f"[幂等] 今天收盘后已发过（{key_text} @ {when}），跳过")
+            if key_text in body:
+                print(f"[幂等] 本期已推送过（{key_text}），跳过")
                 return True
-            print(f"[幂等] 发现盘中那条（{when}），不算数，继续发送正式版")
         return False
     except Exception as e:  # noqa: BLE001
         print(f"[幂等] 检查异常（按未发处理）: {e}")
@@ -362,7 +354,8 @@ def feishu_send_post(png_path, title, lines):
     if not app_secret:
         print("[chart] 未配置 FEISHU_APP_SECRET，跳过发送")
         return False
-    key = f"每日一图 {datetime.date.today():%m-%d}"
+    _data_date = (d1.get("date") or str(datetime.date.today()))
+    key = f"每日一图 {_data_date[5:]}"
     if already_sent_today(chat_id, key,
                           os.environ.get("FEISHU_APP_ID", "cli_aae07cacb1785bdb"),
                           os.environ.get("FEISHU_APP_SECRET", "")):

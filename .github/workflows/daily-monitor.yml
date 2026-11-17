@@ -57,9 +57,9 @@ jobs:
             python growth_dividend_monitor.py && break
             echo "创红第 $i 次失败，60s 后重试"; sleep 60
           done
-      - name: 冷却 60s，避免同一出口 IP 连续请求被限流
+      - name: 冷却 90s，避免同一出口 IP 连续请求被限流
         if: always()
-        run: sleep 60
+        run: sleep 90
 
       - name: 运行科创50/红利风格轮动监控(科创版)
         if: always()
