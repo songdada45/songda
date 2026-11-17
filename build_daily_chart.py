@@ -346,6 +346,23 @@ def already_sent_today(chat_id, key_text, app_id, app_secret):
         return False
 
 
+def _bj_now():
+    import datetime as _dt
+    return _dt.datetime.now(_dt.timezone(_dt.timedelta(hours=8)))
+
+
+def should_send_now(data_date_str):
+    """只在北京时间 14:45 之后推送；凌晨/早盘的重复跑直接跳过（数据还是前一天的）。
+
+    返回 (是否发送, 说明)
+    """
+    now = _bj_now()
+    today = now.strftime("%Y-%m-%d")
+    if (now.hour, now.minute) < (15, 5):
+        return False, f"北京时间 {now:%H:%M} 尚未收盘（早于 15:05），数据日 {data_date_str}，跳过推送"
+    return True, f"北京时间 {now:%H:%M}，数据日 {data_date_str}，正常推送"
+
+
 def feishu_send_post(png_path, title, lines):
     import requests
     app_id = os.environ.get("FEISHU_APP_ID", "cli_aae07cacb1785bdb")
@@ -462,6 +479,13 @@ def main():
     else:
         title = f"{date_s} · 一套持仓一套空仓，各自按条件执行"
     lines = [short(d1, v1), short(d2, v2)]
+    _dd = (d1.get("date") if d1.get("rows") else (d2.get("date") if d2.get("rows") else ""))
+    _go, _why = should_send_now(_dd)
+    print(f"[窗口] {_why}")
+    if not _go:
+        (OUT_DIR / "caption.txt").write_text(title + "\n" + "\n".join(lines) +
+                                             "\n\n（本次未推送：不在收盘后窗口）", encoding="utf-8")
+        return 0
     ok = feishu_send_post(str(png), title, lines)
     (OUT_DIR / "caption.txt").write_text(title + "\n" + "\n".join(lines), encoding="utf-8")
     return 0 if (ok or not os.environ.get("FEISHU_APP_SECRET")) else 1
