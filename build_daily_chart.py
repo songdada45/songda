@@ -31,8 +31,8 @@ C_PANEL = "#161a22"
 C_GRID = "#2a3040"
 C_TXT = "#e6e8ee"
 C_DIM = "#8b93a7"
-C_GREEN = "#3ddc84"
-C_RED = "#ff5c5c"
+C_UP = "#ff4d4f"      # 红 = 涨 / 盈利 / 持仓（A股习惯）
+C_DOWN = "#2ecc71"    # 绿 = 跌 / 亏损 / 空仓
 C_BLUE = "#5b9bff"
 C_ORANGE = "#ffb020"
 C_GRAY = "#6b7280"
@@ -149,7 +149,7 @@ def draw_panel(fig, gs, d, v, title):
 
     # regime 底色
     for i in range(len(rows)):
-        col = C_GREEN if st[i] == 1 else C_RED
+        col = C_UP if st[i] == 1 else C_DOWN
         ax.axvspan(i - 0.5, i + 0.5, color=col, alpha=0.07, lw=0)
 
     ax.fill_between(x, lo, up, color=C_BLUE, alpha=0.16, label="缓冲区")
@@ -185,9 +185,9 @@ def draw_panel(fig, gs, d, v, title):
 
     ok = bool(v["in_growth"])
     if ok:
-        badge, bcol = ("满仓" if v["weight"] >= 1 else "半仓"), C_GREEN
+        badge, bcol = ("满仓" if v["weight"] >= 1 else "半仓"), C_UP
     else:
-        badge, bcol = "空仓", C_RED
+        badge, bcol = "空仓", C_DOWN
 
     # 标题
     ax2.text(0.06, 0.95, badge, color=bcol, fontsize=30, fontweight="bold", va="top")
@@ -196,13 +196,13 @@ def draw_panel(fig, gs, d, v, title):
 
     # 状态条
     bar_x, bar_w, bar_y, bar_h = 0.06, 0.88, 0.70, 0.055
-    for x0, w, col, alpha in [(bar_x, bar_w * 0.25, C_RED, 0.30),
+    for x0, w, col, alpha in [(bar_x, bar_w * 0.25, C_DOWN, 0.30),
                               (bar_x + bar_w * 0.25, bar_w * 0.5, C_GRAY, 0.35),
-                              (bar_x + bar_w * 0.75, bar_w * 0.25, C_GREEN, 0.30)]:
+                              (bar_x + bar_w * 0.75, bar_w * 0.25, C_UP, 0.30)]:
         ax2.add_patch(Rectangle((x0, bar_y), w, bar_h, facecolor=col, alpha=alpha, lw=0))
-    ax2.text(bar_x + bar_w * 0.125, bar_y - 0.035, "红利区", color=C_RED, fontsize=8, ha="center")
+    ax2.text(bar_x + bar_w * 0.125, bar_y - 0.035, "红利区", color=C_DOWN, fontsize=8, ha="center")
     ax2.text(bar_x + bar_w * 0.50, bar_y - 0.035, "缓冲区", color=C_DIM, fontsize=8, ha="center")
-    ax2.text(bar_x + bar_w * 0.875, bar_y - 0.035, "成长区", color=C_GREEN, fontsize=8, ha="center")
+    ax2.text(bar_x + bar_w * 0.875, bar_y - 0.035, "成长区", color=C_UP, fontsize=8, ha="center")
 
     dev = v["last"]["ratio"] / v["last"]["ma"] - 1
     norm = 0.5 + 0.5 * (dev / d["band"]) / 2.0
@@ -223,14 +223,14 @@ def draw_panel(fig, gs, d, v, title):
     # 关键数字
     if not ok:
         ax2.text(0.06, 0.56, "距买入还差", color=C_DIM, fontsize=10)
-        ax2.text(0.06, 0.475, f"{abs(v['need_up'])*100:.1f}%", color=C_GREEN,
+        ax2.text(0.06, 0.475, f"{abs(v['need_up'])*100:.1f}%", color=C_UP,
                  fontsize=30, fontweight="bold")
         ax2.text(0.06, 0.405, f"买点 {d['growth_name']} {v['buy_trigger']:,.0f}"
                               f"（今天 {v['last']['growth']:,.0f}）", color=C_TXT, fontsize=10)
     else:
         need_down = v["last"]["growth"] / v["sell_trigger"] - 1
         ax2.text(0.06, 0.56, "距卖出还差", color=C_DIM, fontsize=10)
-        ax2.text(0.06, 0.475, f"{abs(need_down)*100:.1f}%", color=C_RED,
+        ax2.text(0.06, 0.475, f"{abs(need_down)*100:.1f}%", color=C_DOWN,
                  fontsize=30, fontweight="bold")
         ax2.text(0.06, 0.405, f"卖点 {d['growth_name']} {v['sell_trigger']:,.0f}"
                               f"（今天 {v['last']['growth']:,.0f}）", color=C_TXT, fontsize=10)
@@ -277,9 +277,9 @@ def build(d1, d2, now=None):
     elif stale:
         headline, hcol = "注意：数据未更新到最新交易日，仅供参考", C_ORANGE
     elif both_out:
-        headline, hcol = "今天：两套方案都空仓，不用操作", C_RED
+        headline, hcol = "今天：两套方案都空仓，不用操作", C_DOWN
     elif both_in:
-        headline, hcol = "今天：两套方案都持仓，继续持有", C_GREEN
+        headline, hcol = "今天：两套方案都持仓，继续持有", C_UP
     else:
         headline, hcol = "今天：一套持仓一套空仓，按各自条件执行", C_ORANGE
     axh.text(0, 0.30, f"{now:%Y-%m-%d}（周{'一二三四五六日'[now.weekday()]}）",
@@ -296,7 +296,7 @@ def build(d1, d2, now=None):
 
     # footer
     axf = fig.add_subplot(gs[3, 0]); axf.axis("off")
-    axf.text(0, 0.55, f"更新 {now:%Y-%m-%d %H:%M}   ·   绿底＝满仓期，红底＝空仓期",
+    axf.text(0, 0.55, f"更新 {now:%Y-%m-%d %H:%M}   ·   红底＝满仓期，绿底＝空仓期",
              color=C_DIM, fontsize=9, transform=axf.transAxes)
     axf.text(0, 0.10, "比值上穿上轨＝买入，下破下轨＝清仓；买卖点按均线估算，每天会变",
              color=C_GRAY, fontsize=8.5, transform=axf.transAxes)
@@ -436,7 +436,7 @@ def feishu_send_post(png_path, title, lines, key_suffix="", data_date="",
 
 # ───────────────────────── 交易明细图 ─────────────────────────
 def build_trade_chart(d, out_path):
-    """上：净值曲线 + 买卖点（盈利绿/亏损红）；下：逐笔收益柱。"""
+    """上：净值曲线 + 买卖点（盈利红/亏损绿）；下：逐笔收益柱。"""
     import numpy as np
     trades = sorted([t for t in (d.get("trades") or []) if t.get("ret") is not None],
                     key=lambda t: t.get("buy") or "")
@@ -460,8 +460,8 @@ def build_trade_chart(d, out_path):
 
     x = np.arange(len(nav))
     ax.plot(x, nav, color=C_TXT, lw=1.3)
-    ax.fill_between(x, 1, nav, where=np.array(nav) >= 1, color=C_GREEN, alpha=0.07)
-    ax.fill_between(x, 1, nav, where=np.array(nav) < 1, color=C_RED, alpha=0.07)
+    ax.fill_between(x, 1, nav, where=np.array(nav) >= 1, color=C_UP, alpha=0.07)
+    ax.fill_between(x, 1, nav, where=np.array(nav) < 1, color=C_DOWN, alpha=0.07)
 
     didx = {dt: i for i, dt in enumerate(ndates)}
     wins = losses = 0
@@ -471,7 +471,7 @@ def build_trade_chart(d, out_path):
         if i is None:
             continue
         j = j if j is not None and j < len(nav) else len(nav) - 1
-        col = C_GREEN if (t["ret"] or 0) >= 0 else C_RED
+        col = C_UP if (t["ret"] or 0) >= 0 else C_DOWN
         if (t["ret"] or 0) >= 0:
             wins += 1
         else:
@@ -490,7 +490,7 @@ def build_trade_chart(d, out_path):
     except Exception:
         pass
     ax.set_xlim(-2, len(nav) + 1)
-    ax.set_title(f"{d['scheme']} · 净值与买卖点（▲买入 ▼卖出；绿=盈利笔，红=亏损笔）",
+    ax.set_title(f"{d['scheme']} · 净值与买卖点（▲买入 ▼卖出；红=盈利笔，绿=亏损笔）",
                  color=C_TXT, fontsize=12, loc="left", pad=8, fontweight="bold")
     step = max(1, len(ndates) // 6)
     ticks = list(range(0, len(ndates), step))
@@ -507,7 +507,7 @@ def build_trade_chart(d, out_path):
 
     rets = [t["ret"] for t in trades]
     bx = np.arange(len(rets))
-    cols = [C_GREEN if r >= 0 else C_RED for r in rets]
+    cols = [C_UP if r >= 0 else C_DOWN for r in rets]
     ax2.bar(bx, [r * 100 for r in rets], color=cols, alpha=0.85, width=0.72)
     ax2.axhline(0, color=C_DIM, lw=0.8)
     avg = sum(rets) / len(rets) * 100
