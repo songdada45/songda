@@ -3159,6 +3159,14 @@ def write_chart_json(path, scheme, result, combined, prep, basket_info, days=260
             "basket": {"names": names, "next": nxt, "days": ndays},
             "stale": (datetime.strptime(rows[-1]["date"], "%Y-%m-%d").date()
                       < now_cn().date() - timedelta(days=2)),
+            "trades": [
+                {"buy": t.get("buy"), "sell": t.get("sell"), "ret": t.get("ret"),
+                 "days": t.get("days"), "status": t.get("status"),
+                 "weight": t.get("weight")}
+                for t in ((combined or {}).get("period_positions") or [])
+            ],
+            "nav": [round(v, 5) for v in ((combined or {}).get("nav") or [])],
+            "nav_dates": list((combined or {}).get("dates") or []),
             "perf": {"ann": (combined or {}).get("ann_ret"),
                      "mdd": (combined or {}).get("max_dd"),
                      "ytd": ytd, "dd_now": dd_now},

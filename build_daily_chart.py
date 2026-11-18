@@ -372,7 +372,8 @@ def should_send_now(data_date_str):
     return True, f"北京时间 {now:%H:%M}，数据日 {data_date_str}，正常推送"
 
 
-def feishu_send_post(png_path, title, lines, key_suffix="", data_date=""):
+def feishu_send_post(png_path, title, lines, key_suffix="", data_date="",
+                     extra_images=None, data_key_prefix=""):
     import requests
     app_id = os.environ.get("FEISHU_APP_ID", "cli_aae07cacb1785bdb")
     app_secret = os.environ.get("FEISHU_APP_SECRET", "")
@@ -396,21 +397,27 @@ def feishu_send_post(png_path, title, lines, key_suffix="", data_date=""):
             print("[chart] token 失败", tok); return False
         at = tok["tenant_access_token"]
 
-        with open(png_path, "rb") as f:
-            up = requests.post("https://open.feishu.cn/open-apis/im/v1/images",
-                               headers={"Authorization": f"Bearer {at}"},
-                               files={"image_type": (None, "message"),
-                                      "image": (os.path.basename(png_path), f, "image/png")},
-                               timeout=60)
-        up.raise_for_status()
-        ud = up.json()
-        if ud.get("code") != 0:
-            print("[chart] 上传图失败", ud); return False
-        image_key = ud["data"]["image_key"]
+        img_keys = []
+        for pth in [png_path] + list(extra_images or []):
+            if not pth or not os.path.exists(pth):
+                continue
+            with open(pth, "rb") as f:
+                up = requests.post("https://open.feishu.cn/open-apis/im/v1/images",
+                                   headers={"Authorization": f"Bearer {at}"},
+                                   files={"image_type": (None, "message"),
+                                          "image": (os.path.basename(pth), f, "image/png")},
+                                   timeout=90)
+            up.raise_for_status()
+            ud = up.json()
+            if ud.get("code") != 0:
+                print("[chart] 上传图失败", pth, ud); continue
+            img_keys.append(ud["data"]["image_key"])
+        if not img_keys:
+            print("[chart] 没有可上传的图"); return False
 
         content = {"zh_cn": {"title": title,
                              "content": [[{"tag": "text", "text": ln}] for ln in lines]
-                                        + [[{"tag": "img", "image_key": image_key}]]}}
+                                        + [[{"tag": "img", "image_key": k}] for k in img_keys]}}
         resp = requests.post(
             "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
             headers={"Authorization": f"Bearer {at}"},
@@ -427,6 +434,98 @@ def feishu_send_post(png_path, title, lines, key_suffix="", data_date=""):
         return False
 
 
+# ───────────────────────── 交易明细图 ─────────────────────────
+def build_trade_chart(d, out_path):
+    """上：净值曲线 + 买卖点（盈利绿/亏损红）；下：逐笔收益柱。"""
+    import numpy as np
+    trades = sorted([t for t in (d.get("trades") or []) if t.get("ret") is not None],
+                    key=lambda t: t.get("buy") or "")
+    nav = d.get("nav") or []
+    ndates = d.get("nav_dates") or []
+    if not trades or len(nav) < 10:
+        return None
+
+    setup_font()
+    fig = plt.figure(figsize=(12.5, 7.2), dpi=100, facecolor=C_BG)
+    gs = GridSpec(2, 1, figure=fig, height_ratios=[1.55, 1],
+                  hspace=0.30, left=0.07, right=0.97, top=0.88, bottom=0.10)
+
+    # ── 上：净值 + 买卖点 ──
+    ax = fig.add_subplot(gs[0, 0])
+    ax.set_facecolor(C_PANEL)
+    for sp in ax.spines.values():
+        sp.set_color(C_GRID)
+    ax.tick_params(colors=C_DIM, labelsize=8.5)
+    ax.grid(True, color=C_GRID, lw=0.5, alpha=0.4)
+
+    x = np.arange(len(nav))
+    ax.plot(x, nav, color=C_TXT, lw=1.3)
+    ax.fill_between(x, 1, nav, where=np.array(nav) >= 1, color=C_GREEN, alpha=0.07)
+    ax.fill_between(x, 1, nav, where=np.array(nav) < 1, color=C_RED, alpha=0.07)
+
+    didx = {dt: i for i, dt in enumerate(ndates)}
+    wins = losses = 0
+    for t in trades:
+        i = didx.get(t.get("buy"))
+        j = didx.get(t.get("sell")) if t.get("sell") else len(nav) - 1
+        if i is None:
+            continue
+        j = j if j is not None and j < len(nav) else len(nav) - 1
+        col = C_GREEN if (t["ret"] or 0) >= 0 else C_RED
+        if (t["ret"] or 0) >= 0:
+            wins += 1
+        else:
+            losses += 1
+        ax.axvspan(i, j, color=col, alpha=0.10, lw=0)
+        ax.scatter([i], [nav[i]], marker="^", s=38, color=col, zorder=5,
+                   edgecolor="white", linewidth=0.6)
+        ax.scatter([j], [nav[j]], marker="v", s=38, color=col, zorder=5,
+                   edgecolor="white", linewidth=0.6)
+
+    try:
+        ax.set_yscale("log")
+        ax.set_yticks([1, 2, 5, 10, 20, 50, 100, 200, 500])
+        ax.set_yticklabels(["1", "2", "5", "10", "20", "50", "100", "200", "500"])
+        ax.minorticks_off()
+    except Exception:
+        pass
+    ax.set_xlim(-2, len(nav) + 1)
+    ax.set_title(f"{d['scheme']} · 净值与买卖点（▲买入 ▼卖出；绿=盈利笔，红=亏损笔）",
+                 color=C_TXT, fontsize=12, loc="left", pad=8, fontweight="bold")
+    step = max(1, len(ndates) // 6)
+    ticks = list(range(0, len(ndates), step))
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([ndates[i][2:] for i in ticks], color=C_DIM, fontsize=8)
+
+    # ── 下：逐笔盈亏柱 ──
+    ax2 = fig.add_subplot(gs[1, 0])
+    ax2.set_facecolor(C_PANEL)
+    for sp in ax2.spines.values():
+        sp.set_color(C_GRID)
+    ax2.tick_params(colors=C_DIM, labelsize=8.5)
+    ax2.grid(True, axis="y", color=C_GRID, lw=0.5, alpha=0.4)
+
+    rets = [t["ret"] for t in trades]
+    bx = np.arange(len(rets))
+    cols = [C_GREEN if r >= 0 else C_RED for r in rets]
+    ax2.bar(bx, [r * 100 for r in rets], color=cols, alpha=0.85, width=0.72)
+    ax2.axhline(0, color=C_DIM, lw=0.8)
+    avg = sum(rets) / len(rets) * 100
+    ax2.set_title(f"逐笔收益（{len(rets)} 笔：盈 {wins} / 亏 {losses}，"
+                  f"平均 {avg:+.1f}%，胜率 {wins/len(rets)*100:.0f}%）",
+                  color=C_TXT, fontsize=11, loc="left", pad=6, fontweight="bold")
+    ax2.set_ylabel("每笔收益 %", color=C_DIM, fontsize=9)
+    ax2.set_xlim(-1, len(rets))
+    step2 = max(1, len(trades) // 12)
+    ax2.set_xticks(list(range(0, len(trades), step2)))
+    ax2.set_xticklabels([(t.get("buy") or "")[2:] for t in trades][::step2],
+                        color=C_DIM, fontsize=7.5, rotation=0)
+
+    fig.savefig(out_path, facecolor=C_BG, dpi=100)
+    plt.close(fig)
+    return out_path
+
+
 def load_json(name):
     p = OUT_DIR / name
     if not p.exists():
@@ -440,6 +539,8 @@ def load_json(name):
         combined={"current_position": d["position"],
                   "ann_ret": (d.get("perf") or {}).get("ann"),
                   "max_dd": (d.get("perf") or {}).get("mdd")},
+        trades=d.get("trades") or [], nav=d.get("nav") or [],
+        nav_dates=d.get("nav_dates") or [],
         basket={"top3": [{"name": n} for n in (d.get("basket") or {}).get("names", [])],
                 "next_rebalance": (d.get("basket") or {}).get("next"),
                 "days_left": (d.get("basket") or {}).get("days")},
@@ -500,8 +601,17 @@ def main():
         return 0
     if _intraday:
         title = title + "（盘中快照）"
+    trade_imgs = []
+    for _d in (d1, d2):
+        try:
+            _p = build_trade_chart(_d, str(OUT_DIR / f"trades_{_d['scheme']}.png"))
+            if _p:
+                trade_imgs.append(_p)
+        except Exception as _e:  # noqa: BLE001
+            print(f"[chart] {_d.get('scheme')} 交易图失败: {_e}")
     ok = feishu_send_post(str(png), title, lines,
-                          key_suffix=" 盘中" if _intraday else "", data_date=_dd)
+                          key_suffix=" 盘中" if _intraday else "", data_date=_dd,
+                          extra_images=trade_imgs)
     (OUT_DIR / "caption.txt").write_text(title + "\n" + "\n".join(lines), encoding="utf-8")
     return 0 if (ok or not os.environ.get("FEISHU_APP_SECRET")) else 1
 
