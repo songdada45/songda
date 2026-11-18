@@ -360,8 +360,15 @@ def should_send_now(data_date_str):
     today = now.strftime("%Y-%m-%d")
     if os.environ.get("FORCE_SEND") == "1":
         return True, f"FORCE_SEND=1，强制推送（北京时间 {now:%H:%M}，数据日 {data_date_str}）"
-    if (now.hour, now.minute) < (15, 5):
-        return False, f"北京时间 {now:%H:%M} 尚未收盘（早于 15:05），数据日 {data_date_str}，跳过推送"
+    # 只有在「数据是今天、但今天还没收盘」时才跳过（那是盘中快照）；
+    # 若数据是更早的交易日（调度延迟到凌晨/次日），照常补发 —— 迟到也比不发好。
+    before_close = (now.hour, now.minute) < (15, 5)
+    if before_close and (data_date_str or "") == today:
+        return False, (f"北京时间 {now:%H:%M} 未收盘且数据是今天的盘中值"
+                       f"（数据日 {data_date_str}），跳过")
+    if before_close:
+        return True, (f"北京时间 {now:%H:%M} 早于收盘，但数据日是 {data_date_str}"
+                      f"（前一天收盘数据），补发")
     return True, f"北京时间 {now:%H:%M}，数据日 {data_date_str}，正常推送"
 
 
