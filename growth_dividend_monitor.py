@@ -3135,11 +3135,14 @@ def write_chart_json(path, scheme, result, combined, prep, basket_info, days=260
             dd_now = nav[-1] / peak - 1
 
         names = []
-        nxt, ndays = None, None
+        names_live = []
+        nxt, ndays, neff = None, None, None
         if basket_info:
-            names = [t.get("name") for t in basket_info.get("top3", [])]
+            names = [STOCK_NAMES.get(c, c) for c in (basket_info.get("schedule_codes") or [])]
+            names_live = [t.get("name") for t in basket_info.get("top3", [])]
             nxt = basket_info.get("next_rebalance")
             ndays = basket_info.get("days_left")
+            neff = basket_info.get("next_effective")
 
         data = {
             "scheme": scheme,
@@ -3156,7 +3159,8 @@ def write_chart_json(path, scheme, result, combined, prep, basket_info, days=260
                          "entry_date": pos.get("entry_date"),
                          "runup": pos.get("runup"),
                          "hold_days": hold_days},
-            "basket": {"names": names, "next": nxt, "days": ndays},
+            "basket": {"names": names, "names_live": names_live,
+                       "next": nxt, "days": ndays, "next_effective": neff},
             "stale": (datetime.strptime(rows[-1]["date"], "%Y-%m-%d").date()
                       < now_cn().date() - timedelta(days=2)),
             "trades": [

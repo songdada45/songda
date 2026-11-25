@@ -165,8 +165,8 @@ def draw_panel(fig, gs, d, v, title):
     ax.plot(x, up, color=C_ORANGE, lw=0.8, ls="--", alpha=0.7)
     ax.plot(x, lo, color=C_ORANGE, lw=0.8, ls="--", alpha=0.7)
     ax.plot(x, r, color=C_TXT, lw=2.0, label="比值")
-    ax.scatter([x[-1]], [r[-1]], s=90, color=C_BLUE, zorder=5,
-               edgecolor="white", linewidth=1.2)
+    ax.scatter([x[-1]], [r[-1]], s=24, color=C_BLUE, zorder=5,
+               edgecolor="white", linewidth=0.7)
 
     # 标注当前值
     ax.annotate(f"{r[-1]:.4f}", (x[-1], r[-1]), xytext=(-14, 26),
@@ -227,7 +227,7 @@ def draw_panel(fig, gs, d, v, title):
     ax2.text(mx + (0.03 if norm < 0.5 else -0.03), bar_y + bar_h + 0.035, "现在",
              color=C_BLUE, fontsize=9, fontweight="bold",
              ha="left" if norm < 0.5 else "right")
-    if norm <= 0.04 or norm >= 0.96:
+    if (norm <= 0.04 or norm >= 0.96) and not v.get("pending"):
         ax2.text(0.06, bar_y - 0.075,
                  "↓ 已远低于下轨（超出区间）" if norm <= 0.04 else "↑ 已远高于上轨（超出区间）",
                  color=C_DIM, fontsize=8.5)
@@ -262,18 +262,25 @@ def draw_panel(fig, gs, d, v, title):
     # 底部信息
     yy = 0.29
     if d["basket"]:
-        names = "、".join(t["name"] for t in d["basket"].get("top3", []))
-        ax2.text(0.06, yy, f"买什么：{names}", color=C_TXT, fontsize=9.5)
-        ax2.text(0.06, yy - 0.075, f"下次调仓 {d['basket'].get('next_rebalance','?')}"
-                                   f"（{d['basket'].get('days_left','?')} 天）",
+        b = d["basket"]
+        hold = "、".join(b.get("names") or []) or "—"
+        live = "、".join(b.get("names_live") or [])
+        ax2.text(0.06, yy, f"本期篮子：{hold}", color=C_TXT, fontsize=9.5)
+        if live and live != hold:
+            ax2.text(0.06, yy - 0.062, f"指数实时TOP3：{live}", color=C_DIM, fontsize=8.5)
+        _ne = b.get("next_effective")
+        _nx = b.get("next_rebalance") or "?"
+        ax2.text(0.06, yy - 0.128,
+                 f"下次换股 {_nx}（{b.get('days_left','?')} 天"
+                 + (f" · 官方生效 {_ne}" if _ne else "") + "）",
                  color=C_DIM, fontsize=9)
     if ok and v["pos"].get("entry_date"):
-        ax2.text(0.06, yy - 0.15,
+        ax2.text(0.06, yy - 0.195,
                  (f"已持有 {v['hold_days']} 个交易日" if v['hold_days'] else "今日建仓")
                  + " · 建仓前涨幅 "
                  f"{(v['pos'].get('runup') or 0)*100:+.0f}%", color=C_TXT, fontsize=9)
     elif not ok:
-        ax2.text(0.06, yy - 0.15, "当前不持有任何标的", color=C_DIM, fontsize=9)
+        ax2.text(0.06, yy - 0.195, "当前不持有任何标的", color=C_DIM, fontsize=9)
     cm = d.get("combined") or {}
     if cm:
         ann = cm.get("ann_ret")
@@ -582,9 +589,11 @@ def load_json(name):
                   "max_dd": (d.get("perf") or {}).get("mdd")},
         trades=d.get("trades") or [], nav=d.get("nav") or [],
         nav_dates=d.get("nav_dates") or [],
-        basket={"top3": [{"name": n} for n in (d.get("basket") or {}).get("names", [])],
+        basket={"names": (d.get("basket") or {}).get("names", []),
+                "names_live": (d.get("basket") or {}).get("names_live", []),
                 "next_rebalance": (d.get("basket") or {}).get("next"),
-                "days_left": (d.get("basket") or {}).get("days")},
+                "days_left": (d.get("basket") or {}).get("days"),
+                "next_effective": (d.get("basket") or {}).get("next_effective")},
         data_bad=False,
         stale=(d.get("stale") or False),
     )
