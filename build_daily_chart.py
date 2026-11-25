@@ -116,9 +116,17 @@ def verdict(d):
                 hold_days += 1
             else:
                 break
+    # 今日收盘信号 vs 已执行仓位：T+1 才有待执行动作
+    sig = d.get("signal")
+    pending = None
+    if sig == "红利" and in_growth:
+        pending = "exit"
+    elif sig == "成长" and not in_growth:
+        pending = "entry"
     return dict(last=last, in_growth=in_growth, weight=weight, pos=pos,
                 buy_trigger=buy_trigger, need_up=need_up,
-                sell_trigger=sell_trigger, hold_days=hold_days)
+                sell_trigger=sell_trigger, hold_days=hold_days,
+                sig=sig, pending=pending)
 
 
 # ───────────────────────── 画图 ─────────────────────────
@@ -191,8 +199,12 @@ def draw_panel(fig, gs, d, v, title):
 
     # 标题
     ax2.text(0.06, 0.95, badge, color=bcol, fontsize=30, fontweight="bold", va="top")
-    ax2.text(0.06, 0.855, "成长期 · 持有前 3 权重" if ok else "红利期 · 持币等待",
-             color=C_DIM, fontsize=10, va="top")
+    _sub = ("成长期 · 持有前 3 权重" if ok else "红利期 · 持币等待")
+    if v.get("pending") == "exit":
+        _sub = "收盘已跌破下轨 · 明日开盘清仓"
+    elif v.get("pending") == "entry":
+        _sub = "收盘已上穿上轨 · 明日开盘买入"
+    ax2.text(0.06, 0.855, _sub, color=C_DIM, fontsize=10, va="top")
 
     # 状态条
     bar_x, bar_w, bar_y, bar_h = 0.06, 0.88, 0.70, 0.055
@@ -221,7 +233,19 @@ def draw_panel(fig, gs, d, v, title):
                  color=C_DIM, fontsize=8.5)
 
     # 关键数字
-    if not ok:
+    if v.get("pending") == "exit":
+        ax2.text(0.06, 0.565, "明日开盘清仓", color=C_DOWN, fontsize=24, fontweight="bold")
+        ax2.text(0.06, 0.475, f"收盘比值已跌破下轨 {v['last']['lower']:.4f}",
+                 color=C_TXT, fontsize=10)
+        ax2.text(0.06, 0.405, f"{d['growth_name']} 今天 {v['last']['growth']:,.0f}，"
+                              f"清仓参考价 {v['sell_trigger']:,.0f}", color=C_DIM, fontsize=9.5)
+    elif v.get("pending") == "entry":
+        ax2.text(0.06, 0.565, "明日开盘买入", color=C_UP, fontsize=24, fontweight="bold")
+        ax2.text(0.06, 0.475, f"收盘比值已上穿上轨 {v['last']['upper']:.4f}",
+                 color=C_TXT, fontsize=10)
+        ax2.text(0.06, 0.405, f"{d['growth_name']} 今天 {v['last']['growth']:,.0f}，"
+                              f"买入参考价 {v['buy_trigger']:,.0f}", color=C_DIM, fontsize=9.5)
+    elif not ok:
         ax2.text(0.06, 0.56, "距买入还差", color=C_DIM, fontsize=10)
         ax2.text(0.06, 0.475, f"{abs(v['need_up'])*100:.1f}%", color=C_UP,
                  fontsize=30, fontweight="bold")
@@ -245,7 +269,8 @@ def draw_panel(fig, gs, d, v, title):
                  color=C_DIM, fontsize=9)
     if ok and v["pos"].get("entry_date"):
         ax2.text(0.06, yy - 0.15,
-                 f"已持有 {v['hold_days']} 个交易日 · 建仓前涨幅 "
+                 (f"已持有 {v['hold_days']} 个交易日" if v['hold_days'] else "今日建仓")
+                 + " · 建仓前涨幅 "
                  f"{(v['pos'].get('runup') or 0)*100:+.0f}%", color=C_TXT, fontsize=9)
     elif not ok:
         ax2.text(0.06, yy - 0.15, "当前不持有任何标的", color=C_DIM, fontsize=9)
@@ -276,6 +301,16 @@ def build(d1, d2, now=None):
         headline, hcol = "注意：有一路数据未更新，见下方标注", C_ORANGE
     elif stale:
         headline, hcol = "注意：数据未更新到最新交易日，仅供参考", C_ORANGE
+    elif any(verdict(d).get("pending") for d in (d1, d2)):
+        _acts = []
+        for d in (d1, d2):
+            _v = verdict(d)
+            if _v.get("pending") == "exit":
+                _acts.append(f"{d['scheme']} 明日开盘清仓")
+            elif _v.get("pending") == "entry":
+                _acts.append(f"{d['scheme']} 明日开盘买入")
+        headline, hcol = "明天要动手：" + "；".join(
+            a.replace("明日开盘", "开盘") for a in _acts), C_ORANGE
     elif both_out:
         headline, hcol = "今天：两套方案都空仓，不用操作", C_DOWN
     elif both_in:
@@ -381,12 +416,11 @@ def feishu_send_post(png_path, title, lines, key_suffix="", data_date="",
     if not app_secret:
         print("[chart] 未配置 FEISHU_APP_SECRET，跳过发送")
         return False
+    if os.environ.get("SKIP_SEND") == "1":
+        print("[幂等] 当日已推送过（Actions 缓存标记），跳过")
+        return True
     _data_date = data_date or str(datetime.date.today())
     key = f"每日一图 {_data_date[5:]}{key_suffix}"
-    if already_sent_today(chat_id, key,
-                          os.environ.get("FEISHU_APP_ID", "cli_aae07cacb1785bdb"),
-                          os.environ.get("FEISHU_APP_SECRET", "")):
-        return True
 
     try:
         r = requests.post("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
@@ -428,6 +462,12 @@ def feishu_send_post(png_path, title, lines, key_suffix="", data_date="",
         if rd.get("code") != 0:
             print("[chart] 发送失败", rd); return False
         print("[chart] 发送成功 message_id:", rd.get("data", {}).get("message_id", "?"))
+        try:
+            (OUT_DIR.parent / ".sent_marker").write_text(
+                f"{_data_date} {datetime.datetime.now():%Y-%m-%d %H:%M:%S}",
+                encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            pass
         return True
     except Exception as e:  # noqa: BLE001
         print("[chart] 异常:", e)
@@ -534,6 +574,7 @@ def load_json(name):
     # 适配绘图函数需要的结构
     return dict(
         scheme=d["scheme"], date=d.get("date"), rows=d["rows"],
+        signal=d.get("signal"),
         growth_name=d["growth_name"],
         div_name=d["div_name"], band=0.01, window=20,
         combined={"current_position": d["position"],
@@ -572,6 +613,12 @@ def main():
     def short(d, v):
         if not d["rows"]:
             return f"{d['scheme']}｜今日无数据"
+        if v.get("pending") == "exit":
+            return (f"{d['scheme']}｜满仓，收盘已跌破下轨，"
+                    f"明日开盘清仓（{d['growth_name']} 现 {v['last']['growth']:,.0f}）")
+        if v.get("pending") == "entry":
+            return (f"{d['scheme']}｜空仓，收盘已上穿，"
+                    f"明日开盘买入（{d['growth_name']} 现 {v['last']['growth']:,.0f}）")
         if v["in_growth"]:
             return (f"{d['scheme']}｜满仓，{d['growth_name']} 跌到 "
                     f"{v['sell_trigger']:,.0f} 就清仓"
@@ -583,6 +630,14 @@ def main():
     date_s = datetime.date.today().strftime("%m-%d")
     if any(not d.get("rows") for d in (d1, d2)):
         title = f"{date_s} · 有方案数据未更新，仅图供参考"
+    elif v1.get("pending") or v2.get("pending"):
+        _acts = []
+        for _d, _v in ((d1, v1), (d2, v2)):
+            if _v.get("pending") == "exit":
+                _acts.append(f"{_d['scheme']} 开盘清仓")
+            elif _v.get("pending") == "entry":
+                _acts.append(f"{_d['scheme']} 开盘买入")
+        title = f"{date_s} · 明天要动手：{'、'.join(_acts)}"
     elif not v1["in_growth"] and not v2["in_growth"]:
         title = f"{date_s} · 两套都空仓，今天不用操作"
     elif v1["in_growth"] and v2["in_growth"]:

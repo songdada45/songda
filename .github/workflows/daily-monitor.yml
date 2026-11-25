@@ -81,6 +81,33 @@ jobs:
             python kechuang50_monitor.py && break
             echo "科红第 $i 次失败，60s 后重试"; sleep 60
           done
+      - name: 取数据日
+        id: dd
+        if: always()
+        run: |
+          D=$(python - <<'PY'
+          import glob, json
+          fs = sorted(glob.glob(".daily_digest/*.json"))
+          out = ""
+          for f in fs:
+              try:
+                  out = json.load(open(f, encoding="utf-8")).get("date") or out
+              except Exception:
+                  pass
+          print(out)
+          PY
+          )
+          echo "date=$D" >> "$GITHUB_OUTPUT"
+          echo "数据日: $D"
+
+      - name: 检查当日是否已推送（缓存标记）
+        id: sentmark
+        if: always()
+        uses: actions/cache/restore@v4
+        with:
+          path: .sent_marker
+          key: sent-v2-${{ steps.dd.outputs.date }}
+
       - name: 生成「每日一图」并推送（失败回退文字日报）
         if: always() && github.event.inputs.dry_run != 'true'
         env:
@@ -88,6 +115,7 @@ jobs:
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
           FORCE_SEND: ${{ github.event.inputs.force == 'true' && '1' || '0' }}
+          SKIP_SEND: ${{ steps.sentmark.outputs.cache-hit == 'true' && '1' || '0' }}
         run: |
           for i in 1 2 3; do
             python build_daily_chart.py && break
@@ -96,6 +124,24 @@ jobs:
             sleep 30
           done
           true
+
+      - name: 判断今天是否真的发过（有标记文件）
+        id: mark
+        if: always()
+        run: |
+          if [ -f .sent_marker ]; then
+            echo "ok=1" >> "$GITHUB_OUTPUT"; echo "已发送，写标记"
+          else
+            echo "ok=0" >> "$GITHUB_OUTPUT"; echo "未发送，不写标记"
+          fi
+
+      - name: 记录当日已推送（缓存标记）
+        if: always() && steps.mark.outputs.ok == '1'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .sent_marker
+          key: sent-v2-${{ steps.dd.outputs.date }}
 
       - name: 试跑模式：只出图不发送
         if: always() && github.event.inputs.dry_run == 'true'

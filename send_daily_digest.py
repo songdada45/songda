@@ -163,6 +163,12 @@ def send_text(text: str) -> bool:
             print("[digest] 发送失败:", rd)
             return False
         print("[digest] 发送成功 message_id:", rd.get("data", {}).get("message_id", "?"))
+        try:
+            import pathlib
+            pathlib.Path(".sent_marker").write_text(
+                f"{datetime.date.today():%Y-%m-%d} digest", encoding="utf-8")
+        except Exception:
+            pass
         return True
     except Exception as e:  # noqa: BLE001
         print("[digest] 异常:", e)
